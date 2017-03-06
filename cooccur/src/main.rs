@@ -50,6 +50,12 @@ fn get_cooccurrence(verbose: i32, symmetric: bool, window_size: i32, max_product
             if verbose > $v { writeln!(io::stderr(), $fmt, $($arg)*).unwrap(); }
         );
     }
+    macro_rules! min {
+        ($a: expr, $b: expr) => { if $a <= $b { $a } else { $b } };
+    }
+    macro_rules! max {
+        ($a: expr, $b: expr) => { if $a >= $b { $a } else { $b } };
+    }
 
     log!(-1, "COUNTING COOCCURRENCES");
     log!(0, "window size: {}", window_size);
@@ -57,41 +63,65 @@ fn get_cooccurrence(verbose: i32, symmetric: bool, window_size: i32, max_product
     log!(1, "max product: {}", max_product);
     log!(1, "overflow length: {}", overflow_length);
 
-    let mut vocab_hash: HashMap<String, u32> = HashMap::new();
+    let mut vocab_hash: HashMap<String, i64> = HashMap::new();
     {
         log!(1, "Reading vocab from file \"{}\"...", vocab_file);
         let file = io::BufReader::new(fs::File::open(vocab_file).expect("Unable to open vocab file."));
+        let mut vocab_rank = 1i64;
         for line in file.lines() {
             let line = line.expect("vocab file read error.");
             let vec: Vec<&str> = line.split_whitespace().collect();
             let word = vec[0];
-            let num = vec[1].parse::<u32>().expect("Parse error.");
+            //let num = vec[1].parse::<u32>().expect("Parse error.");
 
-            vocab_hash.insert(word.to_string(), num);
+            vocab_hash.insert(word.to_string(), vocab_rank);
+            vocab_rank += 1;
         }
         log!(1, "loaded {} words.\nBuilding lookup table...", vocab_hash.len());
     }
     let mut table: Vec<Vec<f32>> = Vec::with_capacity(vocab_hash.len());
     {
-        macro_rules! min {
-            ($a: expr, $b: expr) => { if $a < $b { $a } else { $b } };
-        }
         for a in 0..vocab_hash.len() {
             table.push(vec![0.0_f32 ; min!(max_product / a, vocab_hash.len())]);
         }
     }
     {
-        let mut counter = 0i32;
+        let mut fcounter = 0i32;
+        let mut wcounter = 0i64;
+        let mut cr: Vec<CooccurRec> = Vec::with_capacity(overflow_length + 1);
+        let mut history = vec![0i64 ; window_size];
         let stdin = io::BufReader::new(io::stdin());
-        'outer: loop {
-            progress!(1, "Processing token: {}", counter);
-            let mut file = fs::File::open(get_filename(file_head, counter)).expect("File open error.");
-            while 0 {
-                let flag = get_word(&stdin);
+        'outer: loop {  // for each file.
+            progress!(1, "Processing token: 0");
+            let mut file = fs::File::open(get_filename(file_head, fcounter)).expect("File open error.");
+            loop {  // for each line.
+                let mut n_words = 0;
+                while let Some(word) = get_word(&stdin) {
+                    wcounter += 1;
+                    if counter % 100000 == 0 { progress!(1, "\x1b[19G{}", wcounter); }
+                    if let Some(w2) = vocab_hash.get(word) {
+                        for k in max!(wcounter - window_size, 0) .. (wcounter - 1).rev() {
+                            let w1 = history[k % window_size];
+                            if w1 < max_product / w2 {  // Product is small enough to store in a full array
+                                table[w1 - 1][w2 - 2] += (1.0 / (wcounter - k) as f64) as f32;
+                                if symmetric { table[w2 - 1][w1 - 2] += (1.0 / (wcounter - k) as f64) as f32; }
+                            }
+                            else {  // Product is too big, data is likely to be sparse. Store these entries in a temporary buffer to be sorted, mered (accumulated), and written to file when it gets full.
+                                cr.push(CooccurRec { word1: w1, word2: w2, val: get_val(?)});
+                                if symmetric { cr.push(CooccurRec { word1: w2, word2: w1, val: get_val(?)}); }
+                            }
+                            history[wcounter % window_size] = w2;
+                            // TODO: write here...
+                        }
+                    }
+                }
+                if n_words == 0 { break; }
             }
+            // TODO:
             // sort cr
             // write cr
         }
+        // TODO: write out ...
     }
     0
 }
