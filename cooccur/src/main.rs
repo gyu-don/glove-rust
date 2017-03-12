@@ -1,13 +1,39 @@
 use std::{env, io, mem, num, i32, usize, fs, slice, string};
 use std::io::{Read, Write, BufRead, Error, ErrorKind};
 use std::cmp::Ordering;
-use std::collections::{HashMap,VecDeque};
+use std::collections::{HashMap,BinaryHeap};
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq)]
 struct CooccurRec {
     word1: u32,
     word2: u32,
     val: f32,
+}
+
+#[derive(Copy, Clone, PartialEq)]
+struct CRecId {
+    crec: CooccurRec,
+    id: usize,
+}
+impl CRecId {
+    fn new(c: CooccurRec, n: usize) -> CRecId {
+        CRecId { crec: c, id: n}
+    }
+}
+impl Eq for CRecId {}
+impl Ord for CRecId {
+    fn cmp(&self, other: &CRecId) -> Ordering {
+        // For using std::collections::BinaryHeap, ordering is reversed.
+        match other.crec.word1.cmp(&self.crec.word1) {
+            Ordering::Equal => other.crec.word2.cmp(&self.crec.word2),
+            x => x,
+        }
+    }
+}
+impl PartialOrd for CRecId {
+    fn partial_cmp(&self, other: &CRecId) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 static mut verbose: i32 = 2;
@@ -77,9 +103,9 @@ fn get_word(fin: &io::Read) -> GetWord {
     }
 }
 
-fn merge_files(file_head: &str, num: i32) {
+fn merge_files(file_head: &str, num: usize) {
     progress!(1, "Merging cooccurrence files: processed 0 lines.");
-    let pq = VecDeque::<(CooccurRec, i32)>::new();
+    let pq = BinaryHeap::<CRecId>::new();
     let fid = Vec::<fs::File>::new();
     for i in 0..num {
         let mut data: CooccurRec;
@@ -87,13 +113,13 @@ fn merge_files(file_head: &str, num: i32) {
         f.read_exact(unsafe {
             slice::from_raw_parts_mut((&mut data as *mut CooccurRec) as *mut u8,
             mem::size_of::<CooccurRec>())}).unwrap();
-        pq.push_back((data, i));
+        pq.push(CRecId::new(data, i));
         fid.push(f);
     }
-    // Pop op node, save it in old to see if the next entry is a duplicate
-    let mut size = num as usize;
-    let (mut old, mut i) = match pq.pop_front().unwrap();
-
+    // Pop top node, save it in old to see if the next entry is a duplicate
+    let mut new = pq.pop().unwrap();
+    //...
+    //Repeatedly...
 }
 
 fn get_cooccurrence(symmetric: bool, window_size: usize,
@@ -115,13 +141,11 @@ fn get_cooccurrence(symmetric: bool, window_size: usize,
     let mut vocab_hash: HashMap<String, i64> = HashMap::new();
     log!(1, "Reading vocab from file \"{}\"...", vocab_file);
     {
-        let file = io::BufReader::new(fs::File::open(vocab_file)
-                                      .expect("Unable to open vocab file."));
+        let file = io::BufReader::new(fs::File::open(vocab_file).unwrap());
         for (i, line) in file.lines().enumerate() {
-            let line = line.expect("vocab file read error.");
+            let line = line.unwrap();
             let vec: Vec<&str> = line.split_whitespace().collect();
             let word = vec[0];
-            //let num = vec[1].parse::<u32>().expect("Parse error.");
 
             vocab_hash.insert(word.to_string(), i as i64);
         }
