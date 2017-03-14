@@ -1,5 +1,5 @@
-use std::{env, io, mem, num, i32, usize, fs, slice, string};
-use std::io::{Read, Write, BufRead, Error, ErrorKind};
+use std::{env, io, mem, usize, fs, slice};
+use std::io::{Read, Write, BufRead, ErrorKind};
 use std::cmp::Ordering;
 use std::collections::{HashMap,BinaryHeap};
 
@@ -7,7 +7,7 @@ use std::collections::{HashMap,BinaryHeap};
 struct CooccurRec {
     word1: u32,
     word2: u32,
-    val: f32,
+    val: f64,
 }
 
 #[derive(Copy, Clone, PartialEq)]
@@ -36,49 +36,45 @@ impl PartialOrd for CRecId {
     }
 }
 
-static mut verbose: i32 = 2;
+static mut VERBOSE: i32 = 2;
 
 macro_rules! progress {
     ($v:expr, $fmt:expr) => (
-        if verbose > $v { write!(io::stderr(), $fmt).unwrap(); }
+        if unsafe { VERBOSE > $v } { write!(io::stderr(), $fmt).unwrap(); }
     );
     ($v:expr, $fmt:expr, $($arg:tt)*) => (
-        if verbose > $v { write!(io::stderr(), $fmt, $($arg)*).unwrap(); }
+        if unsafe { VERBOSE > $v } { write!(io::stderr(), $fmt, $($arg)*).unwrap(); }
     );
 }
 macro_rules! log {
     ($v:expr, $fmt:expr) => (
-        if verbose > $v { writeln!(io::stderr(), $fmt).unwrap(); }
+        if unsafe { VERBOSE > $v } { writeln!(io::stderr(), $fmt).unwrap(); }
     );
     ($v:expr, $fmt:expr, $($arg:tt)*) => (
-        if verbose > $v { writeln!(io::stderr(), $fmt, $($arg)*).unwrap(); }
+        if unsafe { VERBOSE > $v } { writeln!(io::stderr(), $fmt, $($arg)*).unwrap(); }
     );
 }
 
 enum GetWord {
     Word(String),
-    EndLine,
+    LastWord(String),
     EndOfFile,
     IOError(io::Error),
     Utf8Error(std::string::FromUtf8Error),
 }
 
-fn get_word(fin: &io::Read) -> GetWord {
-    static mut next_endline: bool = false;
-    if next_endline {
-        next_endline = false;
-        return GetWord::EndLine
-    }
+fn get_word(fin: &mut io::Read) -> GetWord {
+    let mut lastword: bool = false;
 
     let mut eof: bool = false;
     let mut word: Vec<u8> = vec![];
-    let mut byte: [u8; 1];
+    let mut byte: [u8; 1] = [0];
     loop {
         match fin.read_exact(&mut byte) {
             Ok(_) => match byte[0] {
                 b' ' | b'\t' => { break; },
                 b'\n' => {
-                    next_endline = true;
+                    lastword = true;
                     break;
                 },
                 c => { word.push(c); }
@@ -93,7 +89,7 @@ fn get_word(fin: &io::Read) -> GetWord {
     }
     if word.len() > 0 {
         match String::from_utf8(word) {
-            Ok(x) => GetWord::Word(x),
+            Ok(x) => if lastword { GetWord::LastWord(x) } else { GetWord::Word(x) },
             Err(e) => GetWord::Utf8Error(e),
         }
     } else if eof {
@@ -103,23 +99,64 @@ fn get_word(fin: &io::Read) -> GetWord {
     }
 }
 
-fn merge_files(file_head: &str, num: usize) {
-    progress!(1, "Merging cooccurrence files: processed 0 lines.");
-    let pq = BinaryHeap::<CRecId>::new();
-    let fid = Vec::<fs::File>::new();
-    for i in 0..num {
-        let mut data: CooccurRec;
-        let f = fs::File::open(format!("{}_{:>4}.bin", file_head, i)).unwrap();
-        f.read_exact(unsafe {
-            slice::from_raw_parts_mut((&mut data as *mut CooccurRec) as *mut u8,
+fn merge_write(new: &CRecId, old: &mut CRecId, fout: &mut Write) -> usize {
+    if new.crec.word1 == old.crec.word1 && new.crec.word2 == old.crec.word2 {
+        old.crec.val += new.crec.val;
+        return 0;
+    }
+    fout.write(unsafe {
+            slice::from_raw_parts((&old.crec as *const CooccurRec) as *const u8,
             mem::size_of::<CooccurRec>())}).unwrap();
-        pq.push(CRecId::new(data, i));
+    *old = *new;
+    1
+}
+
+fn merge_files(file_head: &str, num: usize) -> i32 {
+    progress!(1, "Merging cooccurrence files: processed 0 lines.");
+    let mut fout = io::stdout();
+    let mut pq = BinaryHeap::<CRecId>::new();
+    let mut fid = Vec::<fs::File>::new();
+    let mut new: CooccurRec = CooccurRec { word1: 0, word2: 0, val: 0.0 };
+    for i in 0..num {
+        let mut f = fs::File::open(format!("{}_{:>04}.bin", file_head, i)).unwrap();
+        f.read_exact(unsafe {
+            slice::from_raw_parts_mut((&mut new as *mut CooccurRec) as *mut u8,
+            mem::size_of::<CooccurRec>())}).unwrap();
+        pq.push(CRecId::new(new, i));
         fid.push(f);
     }
     // Pop top node, save it in old to see if the next entry is a duplicate
-    let mut new = pq.pop().unwrap();
-    //...
-    //Repeatedly...
+    let mut old = pq.pop().unwrap();
+    if fid.get(old.id).unwrap().read_exact(unsafe {
+            slice::from_raw_parts_mut((&mut new as *mut CooccurRec) as *mut u8,
+            mem::size_of::<CooccurRec>())}).is_ok() {
+        pq.push(CRecId::new(new, old.id));
+    }
+    //Repeatedly pop top node and fill priority queue until files have reached EOF
+    let mut counter = 0usize;
+    while pq.len() > 0 {
+        let crecid = pq.pop().unwrap();
+        counter += merge_write(&crecid, &mut old, &mut fout);
+        if counter % 100000 == 0 { progress!(1, "\x1b[39G{} lines.", counter); }
+        match fid[crecid.id].read_exact(unsafe {
+            slice::from_raw_parts_mut((&mut new as *mut CooccurRec) as *mut u8,
+            mem::size_of::<CooccurRec>())}) {
+            Ok(_) => pq.push(CRecId::new(new, crecid.id)),
+            Err(x) => if x.kind() != ErrorKind::UnexpectedEof { panic!(x) }
+        }
+    }
+    fout.write(unsafe {
+        slice::from_raw_parts((&old.crec as *const CooccurRec) as *const u8,
+        mem::size_of::<CooccurRec>())}).unwrap();
+    counter += 1;
+    log!(-1, "\x1b[0GMerging coocurrence files: processed {} lines.", counter);
+    for i in 0..num {
+        if let Err(e) = fs::remove_file(format!("{}_{:>04}.bin", file_head, i)) {
+            log!(-1, "Error on fs::remove_file. Error is {:?}", e);
+        }
+    }
+    log!(-1, "");
+    0
 }
 
 fn get_cooccurrence(symmetric: bool, window_size: usize,
@@ -139,7 +176,7 @@ fn get_cooccurrence(symmetric: bool, window_size: usize,
     log!(1, "overflow length: {}", overflow_length);
 
     let mut vocab_hash: HashMap<String, i64> = HashMap::new();
-    log!(1, "Reading vocab from file \"{}\"...", vocab_file);
+    progress!(1, "Reading vocab from file \"{}\"...", vocab_file);
     {
         let file = io::BufReader::new(fs::File::open(vocab_file).unwrap());
         for (i, line) in file.lines().enumerate() {
@@ -147,22 +184,22 @@ fn get_cooccurrence(symmetric: bool, window_size: usize,
             let vec: Vec<&str> = line.split_whitespace().collect();
             let word = vec[0];
 
-            vocab_hash.insert(word.to_string(), i as i64);
+            vocab_hash.insert(word.to_string(), (i + 1) as i64);
         }
         log!(1, "loaded {} words.", vocab_hash.len());
     }
-    let mut table: Vec<Vec<f32>> = Vec::with_capacity(vocab_hash.len());
+    let mut table: Vec<Vec<f64>> = Vec::with_capacity(vocab_hash.len());
     {
-        let mut size = 1;
-        table.push(vec![0.0_f32]);
+        table.push(vec![0.0_f64]);
         for a in 1..vocab_hash.len() {
-            size += min!(max_product / a, vocab_hash.len());
-            table.push(vec![0.0_f32 ; size]);
+            table.push(vec![0.0_f64 ; min!(max_product / a, vocab_hash.len())]);
         }
     }
     // for each token in input stream, calculate a weighted cooccurrence sum within window_size.
-    let value = |j, k| 1.0f32 / (j - k) as f32;
+    let value = |j, k| 1.0f64 / (j - k) as f64;
     let write_chunk = |cr: &Vec<CooccurRec>, n| {
+        log!(-1, "write_chunk, n = {}, cr.len = {}", n, cr.len());
+        if cr.len() == 0 { return; }
         let mut f = fs::File::create(format!("{}_{:>04}.bin", file_head, n)).unwrap();
         let mut old = cr[0];
 
@@ -181,30 +218,35 @@ fn get_cooccurrence(symmetric: bool, window_size: usize,
             mem::size_of::<CooccurRec>())}).unwrap();
     };
 
-    let mut fcounter = 1i32;
+    let mut fcounter = 1usize;
     let mut cr: Vec<CooccurRec> = Vec::with_capacity(overflow_length + 1);
     let mut history = vec![0i64 ; window_size as usize];
     let mut n_words = 0usize;
     let mut j = 0i64;
-    let stdin = io::BufReader::new(io::stdin());
+    let mut stdin = io::BufReader::new(io::stdin());
+    let mut endline = false;
     progress!(1, "Processing token: 0");
     loop {
-        let word = match get_word(&stdin) {
+        if endline {
+            j = 0;
+            endline = false;
+            continue;
+        }
+        let word = match get_word(&mut stdin) {
             GetWord::Word(w) => w,
-            GetWord::EndLine => { j = 0; continue },
+            GetWord::LastWord(w) => { endline = true; w },
             GetWord::EndOfFile => break,
             GetWord::Utf8Error(_) => continue,
             GetWord::IOError(e) => panic!(format!("{:?}", e)),
         };
-        j += 1;
         n_words += 1;
-        if n_words % 100000 == 0 { progress!(1, "\x1b[19G{}", j); }
+        if n_words % 100000 == 0 { progress!(1, "\x1b[19G{}", n_words); }
         if let Some(&w2) = vocab_hash.get(&word) {
             for k in (max!(j - window_size as i64, 0) .. j - 1).rev() {
                 let w1 = history[k as usize % window_size];
                 if (w1 as usize) < max_product / (w2 as usize) {  // Product is small enough to store in a full array
-                    table[(w1 - 1) as usize][(w2 - 2) as usize] += value(j, k);
-                    if symmetric { table[(w2 - 1) as usize][(w1 - 2) as usize] += value(j, k); }
+                    table[(w1 - 1) as usize][(w2 - 1) as usize] += value(j, k);
+                    if symmetric { table[(w2 - 1) as usize][(w1 - 1) as usize] += value(j, k); }
                 }
                 else {  // Product is too big, data is likely to be sparse. Store these entries in a temporary buffer to be sorted, merged (accumulated), and written to file when it gets full.
                     cr.push(CooccurRec { word1: w1 as u32, word2: w2 as u32, val: value(j, k)});
@@ -231,23 +273,25 @@ fn get_cooccurrence(symmetric: bool, window_size: usize,
     });
     write_chunk(&cr, fcounter);
     log!(1, "Writing cooccurrences to disk");
-    let j = i32::MAX;
-    let file = fs::File::create(format!("{}_0000.bin", file_head)).unwrap();
-    for (x, &v) in table.iter().enumerate() {
-        if ((0.75f64 * (vocab_hash.len() / x) as f64).ln() as i32) < j {
+    let mut j = 1e6 as i64;
+    let mut file = fs::File::create(format!("{}_0000.bin", file_head)).unwrap();
+    for (x, v) in table.iter().enumerate() {
+        if ((0.75f64 * (vocab_hash.len() / (x + 1)) as f64).ln() as i64) < j {
+            j = (0.75f64 * (vocab_hash.len() / (x + 1)) as f64).ln() as i64;
             progress!(1, ".")
         }
         for (y, &r) in v.iter().enumerate() {
-            if r != 0f32 {
-                file.write(unsafe {mem::transmute::<u32, &[u8; 4]>(x as u32)});
-                file.write(unsafe {mem::transmute::<u32, &[u8; 4]>(y as u32)});
-                file.write(unsafe {mem::transmute::<f32, &[u8; 4]>(r)});
+            if r != 0f64 {
+                let x = x as u32 + 1;
+                let y = y as u32 + 1;
+                file.write(unsafe { mem::transmute::<&u32, &[u8; 4]>(&x) }).unwrap();
+                file.write(unsafe { mem::transmute::<&u32, &[u8; 4]>(&y) }).unwrap();
+                file.write(unsafe { mem::transmute::<&f64, &[u8; 8]>(&r) }).unwrap();
             }
         }
     }
     log!(1, "{} files in total.", fcounter);
-    merge_files(file_head, fcounter + 1);
-    0
+    merge_files(file_head, fcounter + 1)
 }
 
 fn main() {
@@ -256,8 +300,8 @@ fn main() {
     let mut memory_limit = 3.0;
     let mut vocab_file = "vocab.txt".to_string();
     let mut file_head = "overflow".to_string();
-    let mut max_product: Option<usize> = None;
-    let mut overflow_length: Option<usize> = None;
+    let max_product: usize;
+    let overflow_length: usize;
     {
         let args: Vec<String> = env::args().collect();
 
@@ -290,6 +334,8 @@ Example usage:
 ");
             std::process::exit(0);
         }
+        let mut max_product_opt: Option<usize> = None;
+        let mut overflow_length_opt: Option<usize> = None;
         let mut is_skip = true;
         let mut it = args.into_iter().peekable();
         loop {
@@ -303,9 +349,10 @@ Example usage:
             }
             match arg.as_ref() {
                 "-verbose" => {
-                    verbose = it.peek().and_then(|v| v.parse().ok())
+                    let v_ = it.peek().and_then(|v| v.parse().ok())
                         .and_then(|x| if 0 <= x && x <= 2 { Some(x) } else { None })
                         .expect("-verbose <int>, verbosity: 0, 1, or 2 (default)");
+                    unsafe { VERBOSE = v_; }
                     is_skip = true;
                 },
                 "-symmetric" => {
@@ -315,11 +362,13 @@ Example usage:
                     is_skip = true;
                 },
                 "-window-size" => {
-                    window_size = it.peek().and_then(|v| v.parse().ok()).expect("-window-size <int>");
+                    window_size = it.peek().and_then(|v| v.parse().ok())
+                        .expect("-window-size <int>");
                     is_skip = true;
                 },
                 "-memory" => {
-                    memory_limit = it.peek().and_then(|v| v.parse().ok()).expect("-memory <float>");
+                    memory_limit = it.peek().and_then(|v| v.parse().ok())
+                        .expect("-memory <float>");
                     is_skip = true;
                 },
                 "-vocab-file" => {
@@ -331,21 +380,24 @@ Example usage:
                     is_skip = true;
                 },
                 "-max-product" => {
-                    max_product = Some(it.peek().and_then(|v| v.parse().ok()).expect("-max-product <int>"));
+                    max_product_opt = Some(it.peek().and_then(|v| v.parse().ok())
+                                           .expect("-max-product <int>"));
                     is_skip = true;
                 },
                 "-overflow-length" => {
-                    overflow_length = Some(it.peek().and_then(|v| v.parse().ok()).expect("-overflow-length <int>"));
+                    overflow_length_opt = Some(it.peek().and_then(|v| v.parse().ok())
+                                               .expect("-overflow-length <int>"));
                     is_skip = true;
                 },
                 &_ => {},
             }
-            let rlimit = 0.85 * memory_limit * 1073741824_f64 / mem::size_of::<f64>() as f64;
-            let mut n = 1e5_f64;
-            while (rlimit - n * (n.ln() + 0.1544313298)).abs() > 1e-3 { n = rlimit / (n.ln() + 0.1544313298) }
-            max_product = max_product.or_else(|| Some(n as usize));
-            overflow_length = overflow_length.or_else(|| Some((rlimit / 6.0) as usize));
         }
-        //std::process::exit(get_counts(verbose, max_vocab, min_count));
+        let rlimit = 0.85 * memory_limit * 1073741824_f64 / mem::size_of::<CooccurRec>() as f64;
+        let mut n = 1e5_f64;
+        while (rlimit - n * (n.ln() + 0.1544313298)).abs() > 1e-3 { n = rlimit / (n.ln() + 0.1544313298) }
+        max_product = max_product_opt.unwrap_or(n as usize);
+        overflow_length = overflow_length_opt.unwrap_or((rlimit / 6.0) as usize);
+        std::process::exit(get_cooccurrence(symmetric, window_size, max_product,
+                                            overflow_length, &vocab_file, &file_head))
     }
 }
