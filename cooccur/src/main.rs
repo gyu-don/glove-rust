@@ -66,7 +66,6 @@ enum GetWord {
 fn get_word(fin: &mut io::Read) -> GetWord {
     let mut lastword: bool = false;
 
-    let mut eof: bool = false;
     let mut word: Vec<u8> = vec![];
     let mut byte: [u8; 1] = [0];
     loop {
@@ -80,8 +79,7 @@ fn get_word(fin: &mut io::Read) -> GetWord {
                 c => { word.push(c); }
             },
             Err(e) => if e.kind() == ErrorKind::UnexpectedEof {
-                eof = true;
-                break;
+                return GetWord::EndOfFile;
             } else {
                 return GetWord::IOError(e);
             }
@@ -92,8 +90,6 @@ fn get_word(fin: &mut io::Read) -> GetWord {
             Ok(x) => if lastword { GetWord::LastWord(x) } else { GetWord::Word(x) },
             Err(e) => GetWord::Utf8Error(e),
         }
-    } else if eof {
-        GetWord::EndOfFile
     } else {
         get_word(fin)
     }
@@ -190,10 +186,13 @@ fn get_cooccurrence(symmetric: bool, window_size: usize,
     }
     let mut table: Vec<Vec<f64>> = Vec::with_capacity(vocab_hash.len());
     {
-        table.push(vec![0.0_f64]);
-        for a in 1..vocab_hash.len() {
+        let mut n_elements = 0usize;
+        table.push(vec![]);
+        for a in 1..vocab_hash.len()+1 {
             table.push(vec![0.0_f64 ; min!(max_product / a, vocab_hash.len())]);
+            n_elements += min!(max_product / a, vocab_hash.len());
         }
+        log!(1, "Table contains {} elements.", n_elements);
     }
     // for each token in input stream, calculate a weighted cooccurrence sum within window_size.
     let value = |j, k| 1.0f64 / (j - k) as f64;
@@ -245,11 +244,11 @@ fn get_cooccurrence(symmetric: bool, window_size: usize,
             for k in (max!(j - window_size as i64, 0) .. j - 1).rev() {
                 let w1 = history[k as usize % window_size];
                 if (w1 as usize) < max_product / (w2 as usize) {  // Product is small enough to store in a full array
-                    table[(w1 - 1) as usize][(w2 - 1) as usize] += value(j, k);
-                    if symmetric { table[(w2 - 1) as usize][(w1 - 1) as usize] += value(j, k); }
+                    table[w1 as usize][(w2 - 1) as usize] += value(j, k);
+                    if symmetric { table[w2 as usize][(w1 - 1) as usize] += value(j, k); }
                 }
                 else {  // Product is too big, data is likely to be sparse. Store these entries in a temporary buffer to be sorted, merged (accumulated), and written to file when it gets full.
-                    cr.push(CooccurRec { word1: w1 as u32, word2: w2 as u32, val: value(j, k)});
+                    cr.push(CooccurRec { word1: w1 as u32, word2: w2 as u32, val: value(j, k) });
                     if symmetric { cr.push(CooccurRec { word1: w2 as u32, word2: w1 as u32, val: value(j, k)}); }
                     if cr.len() >= overflow_length - window_size {
                         cr.sort_by(|lhs, rhs| match lhs.word1.cmp(&rhs.word1) {
@@ -261,9 +260,9 @@ fn get_cooccurrence(symmetric: bool, window_size: usize,
                         cr.clear();
                     }
                 }
-                history[j as usize % window_size] = w2;
-                j += 1;
             }
+            history[j as usize % window_size] = w2;
+            j += 1;
         }
     }
     log!(1, "\x1b[0GProcessed {} tokens.", n_words);
@@ -272,7 +271,7 @@ fn get_cooccurrence(symmetric: bool, window_size: usize,
         x => x,
     });
     write_chunk(&cr, fcounter);
-    log!(1, "Writing cooccurrences to disk");
+    progress!(1, "Writing cooccurrences to disk");
     let mut j = 1e6 as i64;
     let mut file = fs::File::create(format!("{}_0000.bin", file_head)).unwrap();
     for (x, v) in table.iter().enumerate() {
