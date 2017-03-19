@@ -325,7 +325,7 @@ Usage options:
 \t-max-product <int>
 \t\tLimit the size of dense cooccurrence array by specifying the max product <int> of the frequency counts of the two cooccurring words.
 \t\tThis value overrides that which is automatically produced by '-memory'. Typically only needs adjustment for use with very large corpora.
-\toverflow-file <file>
+\t-overflow-file <file>
 \t\tFilename, excluding extension, for temporary file; default overflow
 
 Example usage:
