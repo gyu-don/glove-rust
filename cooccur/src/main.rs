@@ -23,7 +23,6 @@ impl CRecId {
 impl Eq for CRecId {}
 impl Ord for CRecId {
     fn cmp(&self, other: &CRecId) -> Ordering {
-        // For using std::collections::BinaryHeap, ordering is reversed.
         match other.crec.word1.cmp(&self.crec.word1) {
             Ordering::Equal => other.crec.word2.cmp(&self.crec.word2),
             x => x,
@@ -112,8 +111,8 @@ fn merge_files(file_head: &str, num: usize) -> i32 {
     let mut fout = io::stdout();
     let mut pq = BinaryHeap::<CRecId>::new();
     let mut fid = Vec::<fs::File>::new();
-    let mut new: CooccurRec = CooccurRec { word1: 0, word2: 0, val: 0.0 };
     for i in 0..num {
+        let mut new = unsafe { mem::uninitialized::<CooccurRec>() };
         let mut f = fs::File::open(format!("{}_{:>04}.bin", file_head, i)).unwrap();
         f.read_exact(unsafe {
             slice::from_raw_parts_mut((&mut new as *mut CooccurRec) as *mut u8,
@@ -123,10 +122,13 @@ fn merge_files(file_head: &str, num: usize) -> i32 {
     }
     // Pop top node, save it in old to see if the next entry is a duplicate
     let mut old = pq.pop().unwrap();
-    if fid.get(old.id).unwrap().read_exact(unsafe {
-            slice::from_raw_parts_mut((&mut new as *mut CooccurRec) as *mut u8,
-            mem::size_of::<CooccurRec>())}).is_ok() {
-        pq.push(CRecId::new(new, old.id));
+    {
+        let mut new = unsafe { mem::uninitialized::<CooccurRec>() };
+        if fid[old.id].read_exact(unsafe {
+                slice::from_raw_parts_mut((&mut new as *mut CooccurRec) as *mut u8,
+                mem::size_of::<CooccurRec>())}).is_ok() {
+            pq.push(CRecId::new(new, old.id));
+        }
     }
     //Repeatedly pop top node and fill priority queue until files have reached EOF
     let mut counter = 0usize;
@@ -134,6 +136,7 @@ fn merge_files(file_head: &str, num: usize) -> i32 {
         let crecid = pq.pop().unwrap();
         counter += merge_write(&crecid, &mut old, &mut fout);
         if counter % 100000 == 0 { progress!(1, "\x1b[39G{} lines.", counter); }
+        let mut new = unsafe { mem::uninitialized::<CooccurRec>() };
         match fid[crecid.id].read_exact(unsafe {
             slice::from_raw_parts_mut((&mut new as *mut CooccurRec) as *mut u8,
             mem::size_of::<CooccurRec>())}) {
@@ -175,29 +178,27 @@ fn get_cooccurrence(symmetric: bool, window_size: usize,
     progress!(1, "Reading vocab from file \"{}\"...", vocab_file);
     {
         let file = io::BufReader::new(fs::File::open(vocab_file).unwrap());
-        for (i, line) in file.lines().enumerate() {
+        let mut j = 1i64;
+        for line in file.lines() {
             let line = line.unwrap();
             let vec: Vec<&str> = line.split_whitespace().collect();
             let word = vec[0];
 
-            vocab_hash.insert(word.to_string(), (i + 1) as i64);
+            vocab_hash.insert(word.to_string(), j);
+            j += 1;
         }
         log!(1, "loaded {} words.", vocab_hash.len());
     }
     let mut table: Vec<Vec<f64>> = Vec::with_capacity(vocab_hash.len());
     {
-        let mut n_elements = 0usize;
         table.push(vec![]);
         for a in 1..vocab_hash.len()+1 {
-            table.push(vec![0.0_f64 ; min!(max_product / a, vocab_hash.len())]);
-            n_elements += min!(max_product / a, vocab_hash.len());
+            table.push(vec![0.0_f64 ; min!(max_product / a, vocab_hash.len()) + 1]);
         }
-        log!(1, "Table contains {} elements.", n_elements);
     }
     // for each token in input stream, calculate a weighted cooccurrence sum within window_size.
     let value = |j, k| 1.0f64 / (j - k) as f64;
     let write_chunk = |cr: &Vec<CooccurRec>, n| {
-        log!(-1, "write_chunk, n = {}, cr.len = {}", n, cr.len());
         if cr.len() == 0 { return; }
         let mut f = fs::File::create(format!("{}_{:>04}.bin", file_head, n)).unwrap();
         let mut old = cr[0];
@@ -219,7 +220,7 @@ fn get_cooccurrence(symmetric: bool, window_size: usize,
 
     let mut fcounter = 1usize;
     let mut cr: Vec<CooccurRec> = Vec::with_capacity(overflow_length + 1);
-    let mut history = vec![0i64 ; window_size as usize];
+    let mut history = vec![0i64 ; window_size];
     let mut n_words = 0usize;
     let mut j = 0i64;
     let mut stdin = io::BufReader::new(io::stdin());
@@ -241,11 +242,11 @@ fn get_cooccurrence(symmetric: bool, window_size: usize,
         n_words += 1;
         if n_words % 100000 == 0 { progress!(1, "\x1b[19G{}", n_words); }
         if let Some(&w2) = vocab_hash.get(&word) {
-            for k in (max!(j - window_size as i64, 0) .. j - 1).rev() {
+            for k in (max!(j - window_size as i64, 0) .. j).rev() {
                 let w1 = history[k as usize % window_size];
                 if (w1 as usize) < max_product / (w2 as usize) {  // Product is small enough to store in a full array
-                    table[w1 as usize][(w2 - 1) as usize] += value(j, k);
-                    if symmetric { table[w2 as usize][(w1 - 1) as usize] += value(j, k); }
+                    table[w1 as usize][w2 as usize] += value(j, k);
+                    if symmetric { table[w2 as usize][w1 as usize] += value(j, k); }
                 }
                 else {  // Product is too big, data is likely to be sparse. Store these entries in a temporary buffer to be sorted, merged (accumulated), and written to file when it gets full.
                     cr.push(CooccurRec { word1: w1 as u32, word2: w2 as u32, val: value(j, k) });
@@ -274,15 +275,15 @@ fn get_cooccurrence(symmetric: bool, window_size: usize,
     progress!(1, "Writing cooccurrences to disk");
     let mut j = 1e6 as i64;
     let mut file = fs::File::create(format!("{}_0000.bin", file_head)).unwrap();
-    for (x, v) in table.iter().enumerate() {
+    for (x, v) in table.iter().enumerate().skip(1) {
         if ((0.75f64 * (vocab_hash.len() / (x + 1)) as f64).ln() as i64) < j {
             j = (0.75f64 * (vocab_hash.len() / (x + 1)) as f64).ln() as i64;
             progress!(1, ".")
         }
-        for (y, &r) in v.iter().enumerate() {
+        for (y, &r) in v.iter().enumerate().skip(1) {
             if r != 0f64 {
-                let x = x as u32 + 1;
-                let y = y as u32 + 1;
+                let x = x as u32;
+                let y = y as u32;
                 file.write(unsafe { mem::transmute::<&u32, &[u8; 4]>(&x) }).unwrap();
                 file.write(unsafe { mem::transmute::<&u32, &[u8; 4]>(&y) }).unwrap();
                 file.write(unsafe { mem::transmute::<&f64, &[u8; 8]>(&r) }).unwrap();
