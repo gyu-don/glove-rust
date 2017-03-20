@@ -1,5 +1,8 @@
-use std::{env, fs, io, mem, slice};
-use std::io::{ErrorKind, Read, Write};
+extern crate rand;
+
+use std::{env, f64, fs, io, mem, slice};
+use std::io::{BufRead, ErrorKind, Read, Seek, Write};
+use rand::Rng;
 
 #[derive(Copy, Clone, PartialEq)]
 struct CooccurRec {
@@ -26,16 +29,105 @@ macro_rules! log {
     );
 }
 
-fn train_glove() -> i32 {
+fn initialize_parameters(w: &mut Vec<f64>, gradsq: &mut Vec<f64>,
+                         vector_size: usize, vocab_size: usize,
+                         input_file: &str) {
+    // Allocate space for word vectors and context word vectors, and corresponding gradsq
+    w.reserve(2 * vocab_size * (vector_size + 2));
+    gradsq.reserve(2 * vocab_size * (vector_size + 2));
+
+    let mut rng = rand::thread_rng();
+    for _ in 0 .. 2 * vocab_size * (vector_size + 1) {
+        w.push((rng.next_f64() - 0.5) / vector_size as f64);
+        gradsq.push(1.0);
+    }
+}
+
+// Train the Glove model
+fn glove_thread(w: &mut Vec<f64>, gradsq: &mut Vec<f64>,
+                alpha: f64, eta: f64, x_max: f64,
+                input_file: &str, vector_size: usize, vocab_size: usize,
+                start: usize, end: usize) {
+    let mut cost = 0f64;
+
+    let mut fin = fs::File::open(input_file).unwrap();
+    fin.seek(io::SeekFrom::Start(start * mem::size_of::<CooccurRec>()));
+    for _ in start .. end {
+        let mut cr: CooccurRec = mem::uninitialized();
+        fin.read_exact(unsafe {
+            slice::from_raw_parts_mut((&mut cr as *mut CooccurRec) as *mut u8,
+            mem::size_of::<CooccurRec>())}).unwrap();
+        if cr.word1 < 1 || cr.word2 < 1 { continue; }
+
+        let l1: usize = (cr.word1 as usize - 1) * (vector_size + 1);
+        let l2: usize = (cr.word2 as usize - 1 + vocab_size) * (vector_size + 1);
+        let diff = w[l1 .. l1 + vector_size].zip(w[l2 .. l2 + vector_size]).fold(0.0, |a, &x| a + x.0 * x.1) + w[vector_size + l1] + w[vector_size + l2] - cr.val.ln();
+        let fdiff = if cr.val > x_max { diff } else { (cr.val / x_max).powf(alpha) * diff };
+        if !diff.is_finite() || !fdiff.is_finite() {
+            progress!(-1, "Caught NaN in diff for kdiff for thread. Skipping update");
+            continue;
+        }
+        cost += 0.5 * fdiff * diff;  // weighted squared error
+
+        // Adaptive gradient updates
+        fdiff *= eta;  // for ease in calculating gradient
+        let w_updates1 = w[l2 .. l2 + vector_size].iter().zip(gradsq[l1..].iter()).map(|a, x| fdiff * x.0 / x.1.sqrt()).collect();
+        let w_updates2 = w[l1 .. l1 + vector_size].iter().zip(gradsq[l2..].iter()).map(|a, x| fdiff * x.0 / x.1.sqrt()).collect();
+        // gradsq += ... 
+        if w_updates1.iter().fold(0f64, |a, x| a + x).is_finite() &&
+           w_updates2.iter().fold(0f64, |a, x| a + x).is_finite() {
+            for (&mut x, y) in w[l1..].iter_mut().zip(w_updates1.iter()) { x -= y; }
+            for (&mut x, y) in w[l2..].iter_mut().zip(w_updates2.iter()) { x -= y; }
+        }
+        // updates for bias terms
+        let check_nan = |x| if !x.is_finite() { progress!(-1, "\ncaught in NaN in update"); 0f64 }
+                            else { x };
+        w[vector_size + l1] -= check_nan(fdiff / gradsq[vector_size + l1].sqrt());
+        w[vector_size + l2] -= check_nan(fdiff / gradsq[vector_size + l2].sqrt());
+        fdiff *= fdiff;
+        gradsq[vector_size + l1] += fdiff;
+        gradsq[vector_size + l2] += fdiff;
+    }
+}
+
+fn train_glove(vector_size: usize, n_threads: usize, n_iter: usize,
+               alpha: f64, x_max: f64, eta: f64,
+               binary: i32, model: i32, save_gradsq: bool, checkpoint_every: bool,
+               vocab_file: &str, input_file: &str, save_file: &str, gradsq_file: &str) -> i32 {
     log!(-1, "TRAINING MODEL");
-    let num_lines = fs::metadata(input_file).unwrap().len() / mem::size_of(CooccurRec);
+    let num_lines = fs::metadata(input_file).unwrap().len() as usize / mem::size_of::<CooccurRec>();
     log!(-1, "Read {} lines.", num_lines);
+
     log!(1, "Initializing parameters...");
-    initialize_parameters();
+    let mut w: Vec<f64> = vec![];
+    let mut gradsq: Vec<f64> = vec![];
+    let vocab_size = io::BufReader::new(fs::File::open(vocab_file).unwrap()).lines().count();
+    initialize_parameters(&mut w, &mut gradsq, vector_size, vocab_size, input_file);
+    log!(1, "done.");
+    log!(0, "vector size: {}", vector_size);
+    log!(0, "vocab size: {}", vocab_size);
+    log!(0, "x_max: {}", x_max);
+    log!(0, "alpha: {}", alpha);
+    // スレ立ち上げ&join, cost回収
     0
 }
 
 fn main() {
+    let mut vector_size = 50usize;
+    let mut n_iter = 25usize;
+    let mut n_threads = 8usize;
+    let mut alpha = 0.75;
+    let mut x_max = 100.0;
+    let mut eta = 0.05;
+    let mut binary = 0i32;
+    let mut model = 2i32;
+    let mut save_gradsq = false;
+    let mut checkpoint_every = false;
+    let mut vocab_file = "vocab.txt".to_string();
+    let mut input_file = "cooccurrence.shuf.bin".to_string();
+    let mut save_file = "vectors".to_string();
+    let mut gradsq_file = "gradsq".to_string();
+
     let args: Vec<String> = env::args().collect();
 
     if args.len() == 1 {
@@ -87,20 +179,6 @@ Example usage:
     }
     let mut is_skip = true;
     let mut it = args.into_iter().peekable();
-    let mut vector_size = 50usize;
-    let mut n_iter = 25usize;
-    let mut n_threads = 8usize;
-    let mut alpha = 0.75;
-    let mut x_max = 100.0;
-    let mut eta = 0.05;
-    let mut binary = 0i32;
-    let mut model = 2i32;
-    let mut save_gradsq = false;
-    let mut checkpoint_every = false;
-    let mut vocab_file = "vocab.txt".to_string();
-    let mut input_file = "cooccurrence.shuf.bin".to_string();
-    let mut save_file = "vectors".to_string();
-    let mut gradsq_file = "gradsq".to_string();
     loop {
         let arg = match it.next() {
             Some(s) => s,
@@ -190,5 +268,9 @@ Example usage:
             &_ => {},
         }
     }
-    std::process::exit(train_glove());
+    std::process::exit(
+        train_glove(vector_size, n_threads, n_iter,
+                    alpha, x_max, eta,
+                    binary, model, save_gradsq, checkpoint_every,
+                    &vocab_file, &input_file, &save_file, &gradsq_file));
 }
