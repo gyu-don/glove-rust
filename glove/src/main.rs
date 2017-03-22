@@ -317,7 +317,7 @@ fn train_glove(vector_size: usize, n_threads: usize, n_iter: usize,
     for i in 0 .. n_iter {
         let threads: Vec<_> = (0 .. n_threads).map(|i| {
             let start = num_lines / n_threads * i;
-            let end = start + num_lines + (if i == n_threads - 1 { num_lines % n_threads } else { 0 });
+            let end = if i == n_threads - 1 { start + num_lines } else { num_lines };
             let share_w = share_w.clone();
             let share_gradsq = share_gradsq.clone();
             let input_file = input_file.clone();
