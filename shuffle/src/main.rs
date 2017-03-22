@@ -205,7 +205,7 @@ Example usage:
                 &_ => {},
             }
         }
-        array_size = array_size_opt.unwrap_or((0.95 * memory_limit as f64 * 1073741724f64 / mem::size_of::<CooccurRec>() as f64) as usize);
+        array_size = array_size_opt.unwrap_or((0.95 * memory_limit as f64 * 1073741824f64 / mem::size_of::<CooccurRec>() as f64) as usize);
     }
     std::process::exit(shuffle_by_chunks(array_size, &temp_file));
 }
