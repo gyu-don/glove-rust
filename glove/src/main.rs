@@ -110,9 +110,9 @@ unsafe fn glove_thread(w_: MutableArray, gradsq_: MutableArray,
     fin.seek(io::SeekFrom::Start((start * mem::size_of::<CooccurRec>()) as u64)).unwrap();
     for _ in start .. end {
         let mut cr: CooccurRec = mem::uninitialized();
-        fin.read_exact(
+        if fin.read_exact(
             slice::from_raw_parts_mut((&mut cr as *mut CooccurRec) as *mut u8,
-            mem::size_of::<CooccurRec>())).unwrap();
+            mem::size_of::<CooccurRec>())).is_err() {panic!(format!("{} {}", start, end));}
         if cr.word1 < 1 || cr.word2 < 1 { continue; }
 
         let l1: usize = (cr.word1 as usize - 1) * (vector_size + 1);
@@ -317,7 +317,7 @@ fn train_glove(vector_size: usize, n_threads: usize, n_iter: usize,
     for i in 0 .. n_iter {
         let threads: Vec<_> = (0 .. n_threads).map(|i| {
             let start = num_lines / n_threads * i;
-            let end = if i == n_threads - 1 { start + num_lines } else { num_lines };
+            let end = if i == n_threads - 1 { num_lines / n_threads * (i + 1) } else { num_lines };
             let share_w = share_w.clone();
             let share_gradsq = share_gradsq.clone();
             let input_file = input_file.clone();
