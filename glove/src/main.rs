@@ -123,7 +123,7 @@ fn glove_thread(w_: MutableArray, gradsq_: MutableArray,
         let w2 = unsafe { &mut (*w)[l2 .. l2 + vector_size] };
         let b1 = unsafe { &mut (*w)[l1 + vector_size] };
         let b2 = unsafe { &mut (*w)[l2 + vector_size] };
-        let diff = w1.iter().zip(w2.iter()).fold(0.0, |a, x| a + x.0 * x.1) + *b1 + *b2 - cr.val.ln();
+        let diff = w1.iter().zip(w2.iter()).fold(0.0, |a, (x, y)| a + x * y) + *b1 + *b2 - cr.val.ln();
         let mut fdiff = if cr.val > x_max { diff } else { (cr.val / x_max).powf(alpha) * diff };
         if !diff.is_finite() || !fdiff.is_finite() {
             progress!(-1, "Caught NaN in diff for kdiff for thread. Skipping update");
@@ -211,7 +211,7 @@ fn save_params_txt(w: &Vec<f64>, save_file: &str, vocab_file: &str,
             },
             2 => {
                 for b in 0 .. vector_size + 1 {
-                    fout.write_fmt(format_args!(" {}", w[(vector_size + a) * (vector_size + 1) + b])).unwrap();
+                    fout.write_fmt(format_args!(" {}", w[a * (vector_size + 1) + b] + w[(vector_size + a) * (vector_size + 1) + b])).unwrap();
                 }
             },
             _ => unreachable!()
