@@ -15,6 +15,7 @@ struct CooccurRec {
 static USE_UNK_VEC: bool = true;
 
 static mut VERBOSE: i32 = 2;
+
 macro_rules! progress {
     ($v:expr, $fmt:expr) => (
         if unsafe { VERBOSE > $v } { write!(io::stderr(), $fmt).unwrap(); }
@@ -36,6 +37,7 @@ macro_rules! log {
 struct MutableArray {
     pub a: sync::Arc<cell::UnsafeCell<Vec<f64>>>
 }
+
 impl MutableArray {
     fn new(v: Vec<f64>) -> MutableArray {
         MutableArray { a: sync::Arc::new(cell::UnsafeCell::new(v)) }
@@ -91,7 +93,7 @@ fn initialize_parameters(w: &mut Vec<f64>, gradsq: &mut Vec<f64>,
     gradsq.reserve(2 * vocab_size * (vector_size + 2));
 
     let mut rng = rand::thread_rng();
-    for _ in 0 .. 2 * vocab_size * (vector_size + 1) {
+    for _ in 0 .. 2 * vocab_size * (vector_size + 2) {
         w.push((rng.next_f64() - 0.5) / vector_size as f64);
         gradsq.push(1.0);
     }
@@ -110,9 +112,9 @@ unsafe fn glove_thread(w_: MutableArray, gradsq_: MutableArray,
     fin.seek(io::SeekFrom::Start((start * mem::size_of::<CooccurRec>()) as u64)).unwrap();
     for _ in start .. end {
         let mut cr: CooccurRec = mem::uninitialized();
-        if fin.read_exact(
+        fin.read_exact(
             slice::from_raw_parts_mut((&mut cr as *mut CooccurRec) as *mut u8,
-            mem::size_of::<CooccurRec>())).is_err() {panic!(format!("{} {}", start, end));}
+            mem::size_of::<CooccurRec>())).unwrap();
         if cr.word1 < 1 || cr.word2 < 1 { continue; }
 
         let l1: usize = (cr.word1 as usize - 1) * (vector_size + 1);
@@ -315,9 +317,9 @@ fn train_glove(vector_size: usize, n_threads: usize, n_iter: usize,
     let share_gradsq = MutableArray::new(gradsq);
     let input_file = sync::Arc::new(input_file.to_string());
     for i in 0 .. n_iter {
-        let threads: Vec<_> = (0 .. n_threads).map(|i| {
-            let start = num_lines / n_threads * i;
-            let end = if i == n_threads - 1 { num_lines / n_threads * (i + 1) } else { num_lines };
+        let threads: Vec<_> = (0 .. n_threads).map(|j| {
+            let start = num_lines / n_threads * j;
+            let end = if j != n_threads - 1 { num_lines / n_threads * (j + 1) } else { num_lines };
             let share_w = share_w.clone();
             let share_gradsq = share_gradsq.clone();
             let input_file = input_file.clone();
