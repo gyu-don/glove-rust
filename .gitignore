@@ -1,4 +1,5 @@
 GloVe
+target
 *.swp
 *.bin
 *.txt

@@ -1,0 +1,2 @@
+[workspace]
+members = ["vocab_count", "cooccur", "shuffle", "glove"]
