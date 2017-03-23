@@ -100,7 +100,7 @@ fn initialize_parameters(w: &mut Vec<f64>, gradsq: &mut Vec<f64>,
 }
 
 // Train the Glove model
-unsafe fn glove_thread(w_: MutableArray, gradsq_: MutableArray,
+fn glove_thread(w_: MutableArray, gradsq_: MutableArray,
                 alpha: f64, eta: f64, x_max: f64,
                 input_file: sync::Arc<String>, vector_size: usize, vocab_size: usize,
                 start: usize, end: usize) -> f64 {
@@ -111,15 +111,19 @@ unsafe fn glove_thread(w_: MutableArray, gradsq_: MutableArray,
     let mut fin = fs::File::open(&*input_file).unwrap();
     fin.seek(io::SeekFrom::Start((start * mem::size_of::<CooccurRec>()) as u64)).unwrap();
     for _ in start .. end {
-        let mut cr: CooccurRec = mem::uninitialized();
-        fin.read_exact(
+        let mut cr: CooccurRec = unsafe { mem::uninitialized() };
+        fin.read_exact(unsafe {
             slice::from_raw_parts_mut((&mut cr as *mut CooccurRec) as *mut u8,
-            mem::size_of::<CooccurRec>())).unwrap();
+            mem::size_of::<CooccurRec>()) }).unwrap();
         if cr.word1 < 1 || cr.word2 < 1 { continue; }
 
         let l1: usize = (cr.word1 as usize - 1) * (vector_size + 1);
         let l2: usize = (cr.word2 as usize - 1 + vocab_size) * (vector_size + 1);
-        let diff = (*w)[l1 .. l1 + vector_size].iter().zip((*w)[l2 .. l2 + vector_size].iter()).fold(0.0, |a, x| a + x.0 * x.1) + (*w)[vector_size + l1] + (*w)[vector_size + l2] - cr.val.ln();
+        let w1 = unsafe { &mut (*w)[l1 .. l1 + vector_size] };
+        let w2 = unsafe { &mut (*w)[l2 .. l2 + vector_size] };
+        let b1 = unsafe { &mut (*w)[l1 + vector_size] };
+        let b2 = unsafe { &mut (*w)[l2 + vector_size] };
+        let diff = w1.iter().zip(w2.iter()).fold(0.0, |a, x| a + x.0 * x.1) + *b1 + *b2 - cr.val.ln();
         let mut fdiff = if cr.val > x_max { diff } else { (cr.val / x_max).powf(alpha) * diff };
         if !diff.is_finite() || !fdiff.is_finite() {
             progress!(-1, "Caught NaN in diff for kdiff for thread. Skipping update");
@@ -128,25 +132,29 @@ unsafe fn glove_thread(w_: MutableArray, gradsq_: MutableArray,
         cost += 0.5 * fdiff * diff;  // weighted squared error
 
         // Adaptive gradient updates
+        let gradsq1 = unsafe { &mut (*gradsq)[l1 .. l1 + vector_size] };
+        let gradsq2 = unsafe { &mut (*gradsq)[l2 .. l2 + vector_size] };
+        let gradsq1_b = unsafe { &mut (*gradsq)[l1 + vector_size] };
+        let gradsq2_b = unsafe { &mut (*gradsq)[l2 + vector_size] };
         fdiff *= eta;  // for ease in calculating gradient
-        let w_updates1: Vec<f64> = (*w)[l2 .. l2 + vector_size].iter().zip((*gradsq)[l1..].iter()).map(|x| fdiff * x.0 / x.1.sqrt()).collect();
-        let w_updates2: Vec<f64> = (*w)[l1 .. l1 + vector_size].iter().zip((*gradsq)[l2..].iter()).map(|x| fdiff * x.0 / x.1.sqrt()).collect();
-        for (g, t) in (*gradsq)[l1 .. l1 + vector_size].iter_mut().zip((*w)[l2..].iter()) { *g += fdiff * *t * fdiff * *t; }
-        for (g, t) in (*gradsq)[l2 .. l2 + vector_size].iter_mut().zip((*w)[l1..].iter()) { *g += fdiff * *t * fdiff * *t; }
+        let w_updates1: Vec<f64> = w2.iter().zip(gradsq1.iter()).map(|(x, y)| fdiff * x / y.sqrt()).collect();
+        let w_updates2: Vec<f64> = w1.iter().zip(gradsq2.iter()).map(|(x, y)| fdiff * x / y.sqrt()).collect();
+        for (g, t) in gradsq1.iter_mut().zip(w2.iter()) { *g += fdiff * t * fdiff * t; }
+        for (g, t) in gradsq2.iter_mut().zip(w1.iter()) { *g += fdiff * t * fdiff * t; }
         if w_updates1.iter().fold(0f64, |a, x| a + x).is_finite() &&
            w_updates2.iter().fold(0f64, |a, x| a + x).is_finite() {
-            for (x, y) in (*w)[l1..].iter_mut().zip(w_updates1.iter()) { *x -= *y; }
-            for (x, y) in (*w)[l2..].iter_mut().zip(w_updates2.iter()) { *x -= *y; }
+            for (x, y) in w1.iter_mut().zip(w_updates1.iter()) { *x -= *y; }
+            for (x, y) in w2.iter_mut().zip(w_updates2.iter()) { *x -= *y; }
         }
         // updates for bias terms
         let check_nan = |x: f64| if !x.is_finite() {
             progress!(-1, "\ncaught in NaN in update"); 0f64
         } else { x };
-        (*w)[vector_size + l1] -= check_nan(fdiff / (*gradsq)[vector_size + l1].sqrt());
-        (*w)[vector_size + l2] -= check_nan(fdiff / (*gradsq)[vector_size + l2].sqrt());
+        *b1 -= check_nan(fdiff / gradsq1_b.sqrt());
+        *b2 -= check_nan(fdiff / gradsq2_b.sqrt());
         fdiff *= fdiff;
-        (*gradsq)[vector_size + l1] += fdiff;
-        (*gradsq)[vector_size + l2] += fdiff;
+        *gradsq1_b += fdiff;
+        *gradsq2_b += fdiff;
     }
     cost
 }
@@ -323,10 +331,10 @@ fn train_glove(vector_size: usize, n_threads: usize, n_iter: usize,
             let share_w = share_w.clone();
             let share_gradsq = share_gradsq.clone();
             let input_file = input_file.clone();
-            thread::spawn(move || unsafe {glove_thread(
+            thread::spawn(move || glove_thread(
                     share_w, share_gradsq, alpha, eta, x_max,
                     input_file, vector_size, vocab_size, start, end
-            )})
+            ))
         }).collect();
         let total_cost = threads.into_iter().map(|e| e.join().unwrap()).fold(0f64, |a, b| a + b);
         log!(-1, "{}, iter: {:>03}, cost: {}", time::strftime("%x - %I:%M.%S%p", &time::now()).unwrap(), i+1, total_cost / num_lines as f64);
@@ -344,6 +352,18 @@ fn train_glove(vector_size: usize, n_threads: usize, n_iter: usize,
                     save_gsq_txt(unsafe{share_gradsq.a.get().as_ref().unwrap()}, gradsq_file, vocab_file, vector_size, vocab_size, i + 1);
                 }
             }
+        }
+    }
+    if binary > 0 {
+        save_params_bin(unsafe{share_w.a.get().as_ref().unwrap()}, save_file, 0);
+        if save_gradsq {
+            save_gsq_bin(unsafe{share_gradsq.a.get().as_ref().unwrap()}, gradsq_file, 0);
+        }
+    }
+    if binary != 1 {
+        save_params_txt(unsafe{share_w.a.get().as_ref().unwrap()}, save_file, vocab_file, vector_size, vocab_size, 0, model);
+        if save_gradsq {
+            save_gsq_txt(unsafe{share_gradsq.a.get().as_ref().unwrap()}, gradsq_file, vocab_file, vector_size, vocab_size, 00000000);
         }
     }
     0
