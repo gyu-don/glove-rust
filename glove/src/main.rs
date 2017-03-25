@@ -89,12 +89,12 @@ fn get_word(fin: &mut io::Read) -> GetWord {
 fn initialize_parameters(w: &mut Vec<f64>, gradsq: &mut Vec<f64>,
                          vector_size: usize, vocab_size: usize) {
     // Allocate space for word vectors and context word vectors, and corresponding gradsq
-    w.reserve(2 * vocab_size * (vector_size + 2));
-    gradsq.reserve(2 * vocab_size * (vector_size + 2));
+    w.reserve(2 * vocab_size * (vector_size + 1));
+    gradsq.reserve(2 * vocab_size * (vector_size + 1));
 
     let mut rng = rand::thread_rng();
-    for _ in 0 .. 2 * vocab_size * (vector_size + 2) {
-        w.push((rng.next_f64() - 0.5) / vector_size as f64);
+    for _ in 0 .. 2 * vocab_size * (vector_size + 1) {
+        w.push((rng.next_f64() - 0.5) / (vector_size + 1) as f64);
         gradsq.push(1.0);
     }
 }
@@ -110,6 +110,10 @@ fn glove_thread(w_: MutableArray, gradsq_: MutableArray,
 
     let mut fin = fs::File::open(&*input_file).unwrap();
     fin.seek(io::SeekFrom::Start((start * mem::size_of::<CooccurRec>()) as u64)).unwrap();
+
+    let mut w_updates1 = vec![0f64 ; vector_size];
+    let mut w_updates2 = vec![0f64 ; vector_size];
+
     for _ in start .. end {
         let mut cr: CooccurRec = unsafe { mem::uninitialized() };
         fin.read_exact(unsafe {
@@ -117,8 +121,8 @@ fn glove_thread(w_: MutableArray, gradsq_: MutableArray,
             mem::size_of::<CooccurRec>()) }).unwrap();
         if cr.word1 < 1 || cr.word2 < 1 { continue; }
 
-        let l1: usize = (cr.word1 as usize - 1) * (vector_size + 1);
-        let l2: usize = (cr.word2 as usize - 1 + vocab_size) * (vector_size + 1);
+        let l1 = (cr.word1 as usize - 1) * (vector_size + 1);
+        let l2 = (cr.word2 as usize - 1 + vocab_size) * (vector_size + 1);
         let w1 = unsafe { &mut (*w)[l1 .. l1 + vector_size] };
         let w2 = unsafe { &mut (*w)[l2 .. l2 + vector_size] };
         let b1 = unsafe { &mut (*w)[l1 + vector_size] };
@@ -137,12 +141,31 @@ fn glove_thread(w_: MutableArray, gradsq_: MutableArray,
         let gradsq1_b = unsafe { &mut (*gradsq)[l1 + vector_size] };
         let gradsq2_b = unsafe { &mut (*gradsq)[l2 + vector_size] };
         fdiff *= eta;  // for ease in calculating gradient
-        let w_updates1: Vec<f64> = w2.iter().zip(gradsq1.iter()).map(|(x, y)| fdiff * x / y.sqrt()).collect();
-        let w_updates2: Vec<f64> = w1.iter().zip(gradsq2.iter()).map(|(x, y)| fdiff * x / y.sqrt()).collect();
-        for (g, t) in gradsq1.iter_mut().zip(w2.iter()) { *g += fdiff * t * fdiff * t; }
-        for (g, t) in gradsq2.iter_mut().zip(w1.iter()) { *g += fdiff * t * fdiff * t; }
-        if w_updates1.iter().fold(0f64, |a, x| a + x).is_finite() &&
-           w_updates2.iter().fold(0f64, |a, x| a + x).is_finite() {
+        {
+            let mut w1_ = w1.iter();
+            let mut w2_ = w2.iter();
+            let mut gsq1_ = gradsq1.iter_mut();
+            let mut gsq2_ = gradsq2.iter_mut();
+            let mut w_updates1_ = w_updates1.iter_mut();
+            let mut w_updates2_ = w_updates2.iter_mut();
+            for _ in 0 .. vector_size {
+                let w1 = w1_.next().unwrap();
+                let w2 = w2_.next().unwrap();
+                let gsq1 = gsq1_.next().unwrap();
+                let gsq2 = gsq2_.next().unwrap();
+                let wup1 = w_updates1_.next().unwrap();
+                let wup2 = w_updates2_.next().unwrap();
+
+                let temp1 = fdiff * w2;
+                let temp2 = fdiff * w1;
+                *wup1 = temp1 / gsq1.sqrt();
+                *wup2 = temp2 / gsq2.sqrt();
+                *gsq1 += temp1 * temp1;
+                *gsq2 += temp2 * temp2;
+            }
+        }
+        if w_updates1.iter().sum::<f64>().is_finite() &&
+           w_updates2.iter().sum::<f64>().is_finite() {
             for (x, y) in w1.iter_mut().zip(w_updates1.iter()) { *x -= *y; }
             for (x, y) in w2.iter_mut().zip(w_updates2.iter()) { *x -= *y; }
         }
