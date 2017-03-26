@@ -7,3 +7,4 @@ workspace = ".."
 [dependencies]
 rand = "0.3.15"
 time = "0.1.36"
+crossbeam = "0.2.10"
