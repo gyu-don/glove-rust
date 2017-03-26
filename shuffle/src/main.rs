@@ -1,7 +1,7 @@
 extern crate rand;
 
 use std::{env, fs, io, mem, slice};
-use std::io::{ErrorKind, Read, Write};
+use std::io::{BufReader, BufWriter, ErrorKind, Read, Write};
 use rand::Rng;
 
 #[derive(Copy, Clone, PartialEq)]
@@ -29,7 +29,7 @@ macro_rules! log {
     );
 }
 
-fn write_chunk<T>(cr: &Vec<CooccurRec>, fout: &mut T) where T: Write + Sized {
+fn write_chunk<T: Write>(cr: &Vec<CooccurRec>, fout: &mut BufWriter<T>) {
     if cr.len() == 0 { return; }
     let mut old = cr[0];
 
@@ -50,10 +50,10 @@ fn write_chunk<T>(cr: &Vec<CooccurRec>, fout: &mut T) where T: Write + Sized {
 
 fn shuffle_merge(array_size: usize, file_head: &str, n_temp_file: usize) -> i32 {
     let mut array: Vec<CooccurRec> = Vec::with_capacity(array_size);
-    let mut fid:  Vec<Option<fs::File>> = Vec::with_capacity(n_temp_file);
+    let mut fid:  Vec<Option<BufReader<fs::File>>> = Vec::with_capacity(n_temp_file);
     for fidcounter in 0 .. n_temp_file {
-        fid.push(Some(fs::File::open(
-                    format!("{}_{:>04}.bin", file_head, fidcounter)).unwrap()));
+        fid.push(Some(BufReader::new(fs::File::open(
+                    format!("{}_{:>04}.bin", file_head, fidcounter)).unwrap())));
     }
     progress!(0, "Merging temp files: processed 0 lines.");
     let mut rng = rand::thread_rng();
@@ -80,7 +80,7 @@ fn shuffle_merge(array_size: usize, file_head: &str, n_temp_file: usize) -> i32 
         if array.len() == 0 { break; }
         total += array.len();
         rng.shuffle(&mut array);
-        write_chunk(&array, &mut io::stdout());
+        write_chunk(&array, &mut BufWriter::new(io::stdout()));
         array.clear();
         progress!(0, "\x1b[31G{} lines.", total);
     }
@@ -103,7 +103,7 @@ fn shuffle_by_chunks(array_size: usize, file_head: &str) -> i32 {
 
     let mut array: Vec<CooccurRec> = Vec::with_capacity(array_size);
     let mut total = 0usize;
-    let mut fin = io::stdin();
+    let mut fin = BufReader::new(io::stdin());
 
     let mut fidcounter = 0;
     progress!(1, "Shuffling by chunks: processed 0 lines.");
@@ -124,16 +124,16 @@ fn shuffle_by_chunks(array_size: usize, file_head: &str) -> i32 {
             rng.shuffle(&mut array);
             total += array.len();
             progress!(1, "\x1b[22Gprocessed {} lines.", total);
-            write_chunk(&array, &mut fs::File::create(
-                    format!("{}_{:>04}.bin", file_head, fidcounter)).unwrap());
+            write_chunk(&array, &mut BufWriter::new(fs::File::create(
+                    format!("{}_{:>04}.bin", file_head, fidcounter)).unwrap()));
             fidcounter += 1;
             array.clear();
         }
     }
     rng.shuffle(&mut array);
     total += array.len();
-    write_chunk(&array, &mut fs::File::create(
-            format!("{}_{:>04}.bin", file_head, fidcounter)).unwrap());
+    write_chunk(&array, &mut BufWriter::new(fs::File::create(
+            format!("{}_{:>04}.bin", file_head, fidcounter)).unwrap()));
     fidcounter += 1;
     log!(1, "\x1b[22Gprocessed {} lines.", total);
     log!(1, "Wrote {} temporary file(s).", fidcounter);

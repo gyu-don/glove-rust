@@ -1,5 +1,5 @@
 use std::{env, io, mem, usize, fs, slice};
-use std::io::{Read, Write, BufRead, ErrorKind};
+use std::io::{BufRead, BufReader, BufWriter, ErrorKind, Read, Write};
 use std::cmp::Ordering;
 use std::collections::{HashMap,BinaryHeap};
 
@@ -108,12 +108,13 @@ fn merge_write(new: &CRecId, old: &mut CRecId, fout: &mut Write) -> usize {
 
 fn merge_files(file_head: &str, num: usize) -> i32 {
     progress!(1, "Merging cooccurrence files: processed 0 lines.");
-    let mut fout = io::stdout();
+    let fout = io::stdout();
+    let mut fout = BufWriter::new(fout.lock());
     let mut pq = BinaryHeap::<CRecId>::new();
-    let mut fid = Vec::<fs::File>::new();
+    let mut fid = Vec::<BufReader<fs::File>>::new();
     for i in 0..num {
         let mut new = unsafe { mem::uninitialized::<CooccurRec>() };
-        let mut f = fs::File::open(format!("{}_{:>04}.bin", file_head, i)).unwrap();
+        let mut f = BufReader::new(fs::File::open(format!("{}_{:>04}.bin", file_head, i)).unwrap());
         f.read_exact(unsafe {
             slice::from_raw_parts_mut((&mut new as *mut CooccurRec) as *mut u8,
             mem::size_of::<CooccurRec>())}).unwrap();
@@ -177,7 +178,7 @@ fn get_cooccurrence(symmetric: bool, window_size: usize,
     let mut vocab_hash: HashMap<String, i64> = HashMap::new();
     progress!(1, "Reading vocab from file \"{}\"...", vocab_file);
     {
-        let file = io::BufReader::new(fs::File::open(vocab_file).unwrap());
+        let file = BufReader::new(fs::File::open(vocab_file).unwrap());
         let mut j = 1i64;
         for line in file.lines() {
             let line = line.unwrap();
@@ -200,7 +201,7 @@ fn get_cooccurrence(symmetric: bool, window_size: usize,
     let value = |j, k| 1.0f64 / (j - k) as f64;
     let write_chunk = |cr: &Vec<CooccurRec>, n| {
         if cr.len() == 0 { return; }
-        let mut f = fs::File::create(format!("{}_{:>04}.bin", file_head, n)).unwrap();
+        let mut f = BufWriter::new(fs::File::create(format!("{}_{:>04}.bin", file_head, n)).unwrap());
         let mut old = cr[0];
 
         for x in &cr[1..] {
@@ -223,7 +224,7 @@ fn get_cooccurrence(symmetric: bool, window_size: usize,
     let mut history = vec![0i64 ; window_size];
     let mut n_words = 0usize;
     let mut j = 0i64;
-    let mut stdin = io::BufReader::new(io::stdin());
+    let mut stdin = BufReader::new(io::stdin());
     let mut endline = false;
     progress!(1, "Processing token: 0");
     loop {
@@ -274,7 +275,7 @@ fn get_cooccurrence(symmetric: bool, window_size: usize,
     write_chunk(&cr, fcounter);
     progress!(1, "Writing cooccurrences to disk");
     let mut j = 1e6 as i64;
-    let mut file = fs::File::create(format!("{}_0000.bin", file_head)).unwrap();
+    let mut file = BufWriter::new(fs::File::create(format!("{}_0000.bin", file_head)).unwrap());
     for (x, v) in table.iter().enumerate().skip(1) {
         if ((0.75f64 * (vocab_hash.len() / (x + 1)) as f64).ln() as i64) < j {
             j = (0.75f64 * (vocab_hash.len() / (x + 1)) as f64).ln() as i64;
@@ -282,11 +283,9 @@ fn get_cooccurrence(symmetric: bool, window_size: usize,
         }
         for (y, &r) in v.iter().enumerate().skip(1) {
             if r != 0f64 {
-                let x = x as u32;
-                let y = y as u32;
-                file.write(unsafe { mem::transmute::<&u32, &[u8; 4]>(&x) }).unwrap();
-                file.write(unsafe { mem::transmute::<&u32, &[u8; 4]>(&y) }).unwrap();
-                file.write(unsafe { mem::transmute::<&f64, &[u8; 8]>(&r) }).unwrap();
+                let crec = CooccurRec { word1: x as u32, word2: y as u32, val: r };
+                file.write(unsafe { slice::from_raw_parts(&crec as *const CooccurRec as *const u8,
+                                                          mem::size_of::<CooccurRec>()) }).unwrap();
             }
         }
     }

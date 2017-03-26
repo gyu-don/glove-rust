@@ -63,15 +63,25 @@ fn get_counts(verbose: i32, max_vocab: usize, min_count: usize) -> i32 {
     let mut max_vocab = max_vocab;
     if max_vocab > 0 && max_vocab < vocab.len() {
         vocab.sort_by_key(|v| usize::MAX - v.count);
+        vocab[..max_vocab].sort_by(|lhs, rhs| match lhs.count.cmp(&rhs.count) {
+            Ordering::Less => Ordering::Greater,
+            Ordering::Equal => lhs.word.cmp(&rhs.word),
+            Ordering::Greater => Ordering::Less,
+        });
     }
-    else { max_vocab = vocab.len() }
-    vocab.sort_by(|lhs, rhs| match lhs.count.cmp(&rhs.count) {
-        Ordering::Less => Ordering::Greater,
-        Ordering::Equal => lhs.word.cmp(&rhs.word),
-        Ordering::Greater => Ordering::Less,
-    });
+    else {
+        vocab.sort_by(|lhs, rhs| match lhs.count.cmp(&rhs.count) {
+            Ordering::Less => Ordering::Greater,
+            Ordering::Equal => lhs.word.cmp(&rhs.word),
+            Ordering::Greater => Ordering::Less,
+        });
+        max_vocab = vocab.len();
+    }
+
 
     let mut n = vocab.len();
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
     for (i, x) in vocab.iter().enumerate() {
         if i == max_vocab { n = i; break; }
         if x.count < min_count {
@@ -79,7 +89,7 @@ fn get_counts(verbose: i32, max_vocab: usize, min_count: usize) -> i32 {
             n = i;
             break;
         }
-        println!("{} {}", x.word, x.count)
+        writeln!(&mut stdout, "{} {}", x.word, x.count).unwrap();
     }
     if n == max_vocab && max_vocab < vocab.len() {
         log!(0, "Truncating vocabulary at size {}.", max_vocab);
