@@ -1,11 +1,13 @@
 extern crate rand;
 extern crate time;
+extern crate crossbeam;
 
-use std::{cell, env, f64, fs, io, mem, slice, sync, thread};
-use std::io::{BufRead, ErrorKind, Read, Seek, Write};
+use std::{env, f64, fs, io, mem, ops, slice};
+use std::io::{BufRead, BufReader, BufWriter, ErrorKind, Read, Seek, Write};
+use std::marker::PhantomData;
 use rand::Rng;
 
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, Debug)]
 struct CooccurRec {
     word1: u32,
     word2: u32,
@@ -33,18 +35,45 @@ macro_rules! log {
     );
 }
 
-#[derive(Clone)]
-struct MutableArray {
-    pub a: sync::Arc<cell::UnsafeCell<Vec<f64>>>
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+struct UnsafeSlice<'a> {
+    p: *mut f64,
+    len: usize,
+    phantom: PhantomData<&'a Vec<f64>>,
 }
-
-impl MutableArray {
-    fn new(v: Vec<f64>) -> MutableArray {
-        MutableArray { a: sync::Arc::new(cell::UnsafeCell::new(v)) }
+unsafe impl<'a> Send for UnsafeSlice<'a> {}
+unsafe impl<'a> Sync for UnsafeSlice<'a> {}
+#[allow(dead_code)]
+impl<'a> UnsafeSlice<'a> {
+    fn new(v: &mut Vec<f64>) -> UnsafeSlice {
+        UnsafeSlice { p: v.as_mut_ptr(), len: v.len(), phantom: PhantomData }
+    }
+    #[inline]
+    unsafe fn get(self, idx: usize) -> Option<&'a f64> {
+        slice::from_raw_parts(self.p, self.len).get(idx)
+    }
+    #[inline]
+    unsafe fn get_slice(self, idx: ops::Range<usize>) -> &'a[f64] {
+        &slice::from_raw_parts(self.p, self.len)[idx]
+    }
+    #[inline]
+    unsafe fn get_mut(self, idx: usize) -> Option<&'a mut f64> {
+        slice::from_raw_parts_mut(self.p, self.len).get_mut(idx)
+    }
+    #[inline]
+    unsafe fn get_slice_mut(self, idx: ops::Range<usize>) -> &'a mut [f64] {
+        &mut slice::from_raw_parts_mut(self.p, self.len)[idx]
+    }
+    #[inline]
+    unsafe fn borrow(self) -> &'a [f64] {
+        slice::from_raw_parts(self.p, self.len)
+    }
+    #[inline]
+    unsafe fn borrow_mut(self) -> &'a mut [f64] {
+        slice::from_raw_parts_mut(self.p, self.len)
     }
 }
-unsafe impl Send for MutableArray {}
-unsafe impl Sync for MutableArray {}
 
 enum GetWord {
     Word(String),
@@ -89,27 +118,29 @@ fn get_word(fin: &mut io::Read) -> GetWord {
 fn initialize_parameters(w: &mut Vec<f64>, gradsq: &mut Vec<f64>,
                          vector_size: usize, vocab_size: usize) {
     // Allocate space for word vectors and context word vectors, and corresponding gradsq
-    w.reserve(2 * vocab_size * (vector_size + 2));
-    gradsq.reserve(2 * vocab_size * (vector_size + 2));
+    w.reserve(2 * vocab_size * (vector_size + 1));
+    gradsq.reserve(2 * vocab_size * (vector_size + 1));
 
     let mut rng = rand::thread_rng();
-    for _ in 0 .. 2 * vocab_size * (vector_size + 2) {
-        w.push((rng.next_f64() - 0.5) / vector_size as f64);
+    for _ in 0 .. 2 * vocab_size * (vector_size + 1) {
+        w.push((rng.next_f64() - 0.5) / (vector_size + 1) as f64);
         gradsq.push(1.0);
     }
 }
 
 // Train the Glove model
-fn glove_thread(w_: MutableArray, gradsq_: MutableArray,
+fn glove_thread(w: UnsafeSlice, gradsq: UnsafeSlice,
                 alpha: f64, eta: f64, x_max: f64,
-                input_file: sync::Arc<String>, vector_size: usize, vocab_size: usize,
+                input_file: &str, vector_size: usize, vocab_size: usize,
                 start: usize, end: usize) -> f64 {
-    let w = w_.a.get();
-    let gradsq = gradsq_.a.get();
     let mut cost = 0f64;
 
-    let mut fin = fs::File::open(&*input_file).unwrap();
+    let mut fin = BufReader::new(fs::File::open(&*input_file).unwrap());
     fin.seek(io::SeekFrom::Start((start * mem::size_of::<CooccurRec>()) as u64)).unwrap();
+
+    let mut w_updates1 = vec![0f64 ; vector_size];
+    let mut w_updates2 = vec![0f64 ; vector_size];
+
     for _ in start .. end {
         let mut cr: CooccurRec = unsafe { mem::uninitialized() };
         fin.read_exact(unsafe {
@@ -117,13 +148,14 @@ fn glove_thread(w_: MutableArray, gradsq_: MutableArray,
             mem::size_of::<CooccurRec>()) }).unwrap();
         if cr.word1 < 1 || cr.word2 < 1 { continue; }
 
-        let l1: usize = (cr.word1 as usize - 1) * (vector_size + 1);
-        let l2: usize = (cr.word2 as usize - 1 + vocab_size) * (vector_size + 1);
-        let w1 = unsafe { &mut (*w)[l1 .. l1 + vector_size] };
-        let w2 = unsafe { &mut (*w)[l2 .. l2 + vector_size] };
-        let b1 = unsafe { &mut (*w)[l1 + vector_size] };
-        let b2 = unsafe { &mut (*w)[l2 + vector_size] };
-        let diff = w1.iter().zip(w2.iter()).fold(0.0, |a, x| a + x.0 * x.1) + *b1 + *b2 - cr.val.ln();
+        let l1 = (cr.word1 as usize - 1) * (vector_size + 1);
+        let l2 = (cr.word2 as usize - 1 + vocab_size) * (vector_size + 1);
+        //if start==37916540 && i > end-6 { log!(-1, "{:?}", cr); }
+        let w1 = unsafe { w.get_slice_mut(l1 .. l1 + vector_size) };
+        let w2 = unsafe { w.get_slice_mut(l2 .. l2 + vector_size) };
+        let b1 = unsafe { w.get_mut(l1 + vector_size).unwrap() };
+        let b2 = unsafe { w.get_mut(l2 + vector_size).unwrap() };
+        let diff = w1.iter().zip(w2.iter()).fold(0.0, |a, (x, y)| a + x * y) + *b1 + *b2 - cr.val.ln();
         let mut fdiff = if cr.val > x_max { diff } else { (cr.val / x_max).powf(alpha) * diff };
         if !diff.is_finite() || !fdiff.is_finite() {
             progress!(-1, "Caught NaN in diff for kdiff for thread. Skipping update");
@@ -132,17 +164,36 @@ fn glove_thread(w_: MutableArray, gradsq_: MutableArray,
         cost += 0.5 * fdiff * diff;  // weighted squared error
 
         // Adaptive gradient updates
-        let gradsq1 = unsafe { &mut (*gradsq)[l1 .. l1 + vector_size] };
-        let gradsq2 = unsafe { &mut (*gradsq)[l2 .. l2 + vector_size] };
-        let gradsq1_b = unsafe { &mut (*gradsq)[l1 + vector_size] };
-        let gradsq2_b = unsafe { &mut (*gradsq)[l2 + vector_size] };
+        let gradsq1 = unsafe { gradsq.get_slice_mut(l1 .. l1 + vector_size) };
+        let gradsq2 = unsafe { gradsq.get_slice_mut(l2 .. l2 + vector_size) };
+        let gradsq1_b = unsafe { gradsq.get_mut(l1 + vector_size).unwrap() };
+        let gradsq2_b = unsafe { gradsq.get_mut(l2 + vector_size).unwrap() };
         fdiff *= eta;  // for ease in calculating gradient
-        let w_updates1: Vec<f64> = w2.iter().zip(gradsq1.iter()).map(|(x, y)| fdiff * x / y.sqrt()).collect();
-        let w_updates2: Vec<f64> = w1.iter().zip(gradsq2.iter()).map(|(x, y)| fdiff * x / y.sqrt()).collect();
-        for (g, t) in gradsq1.iter_mut().zip(w2.iter()) { *g += fdiff * t * fdiff * t; }
-        for (g, t) in gradsq2.iter_mut().zip(w1.iter()) { *g += fdiff * t * fdiff * t; }
-        if w_updates1.iter().fold(0f64, |a, x| a + x).is_finite() &&
-           w_updates2.iter().fold(0f64, |a, x| a + x).is_finite() {
+        {
+            let mut w1_ = w1.iter();
+            let mut w2_ = w2.iter();
+            let mut gsq1_ = gradsq1.iter_mut();
+            let mut gsq2_ = gradsq2.iter_mut();
+            let mut w_updates1_ = w_updates1.iter_mut();
+            let mut w_updates2_ = w_updates2.iter_mut();
+            for _ in 0 .. vector_size {
+                let w1 = w1_.next().unwrap();
+                let w2 = w2_.next().unwrap();
+                let gsq1 = gsq1_.next().unwrap();
+                let gsq2 = gsq2_.next().unwrap();
+                let wup1 = w_updates1_.next().unwrap();
+                let wup2 = w_updates2_.next().unwrap();
+
+                let temp1 = fdiff * w2;
+                let temp2 = fdiff * w1;
+                *wup1 = temp1 / gsq1.sqrt();
+                *wup2 = temp2 / gsq2.sqrt();
+                *gsq1 += temp1 * temp1;
+                *gsq2 += temp2 * temp2;
+            }
+        }
+        if w_updates1.iter().sum::<f64>().is_finite() &&
+           w_updates2.iter().sum::<f64>().is_finite() {
             for (x, y) in w1.iter_mut().zip(w_updates1.iter()) { *x -= *y; }
             for (x, y) in w2.iter_mut().zip(w_updates2.iter()) { *x -= *y; }
         }
@@ -159,15 +210,14 @@ fn glove_thread(w_: MutableArray, gradsq_: MutableArray,
     cost
 }
 
-fn save_params_bin(w: &Vec<f64>, save_file: &str, nb_iter: usize) -> i32 {
-    let mut fout: fs::File;
+fn save_params_bin(w: &[f64], save_file: &str, nb_iter: usize) -> i32 {
     let output_file: String;
     if nb_iter <= 0 {
         output_file = format!("{}.bin", save_file);
     } else {
         output_file = format!("{}.{:>03}.bin", save_file, nb_iter);
     }
-    fout = fs::File::create(output_file).unwrap();
+    let mut fout = BufWriter::new(fs::File::create(output_file).unwrap());
     for x in w.iter() {
         fout.write(unsafe {
             slice::from_raw_parts((x as *const f64) as *const u8, 8)
@@ -176,7 +226,7 @@ fn save_params_bin(w: &Vec<f64>, save_file: &str, nb_iter: usize) -> i32 {
     0
 }
 
-fn save_params_txt(w: &Vec<f64>, save_file: &str, vocab_file: &str,
+fn save_params_txt(w: &[f64], save_file: &str, vocab_file: &str,
                    vector_size: usize, vocab_size: usize,
                    nb_iter: usize, model: i32) -> i32 {
     let output_file: String;
@@ -185,8 +235,8 @@ fn save_params_txt(w: &Vec<f64>, save_file: &str, vocab_file: &str,
     } else {
         output_file = format!("{}.{:>03}.txt", save_file, nb_iter);
     }
-    let mut fout = fs::File::create(output_file).unwrap();
-    let mut fid = fs::File::open(vocab_file).unwrap();
+    let mut fout = BufWriter::new(fs::File::create(output_file).unwrap());
+    let mut fid = BufReader::new(fs::File::open(vocab_file).unwrap());
     for a in 0 .. vocab_size {
         let word = match get_word(&mut fid) {
             GetWord::Word(w) => w,
@@ -205,13 +255,13 @@ fn save_params_txt(w: &Vec<f64>, save_file: &str, vocab_file: &str,
                 }
             },
             1 => {
-                for b in 0 .. vector_size + 1 {
+                for b in 0 .. vector_size {
                     fout.write_fmt(format_args!(" {}", w[a * (vector_size + 1) + b])).unwrap();
                 }
             },
             2 => {
-                for b in 0 .. vector_size + 1 {
-                    fout.write_fmt(format_args!(" {}", w[(vector_size + a) * (vector_size + 1) + b])).unwrap();
+                for b in 0 .. vector_size {
+                    fout.write_fmt(format_args!(" {}", w[a * (vector_size + 1) + b] + w[(vector_size + a) * (vector_size + 1) + b])).unwrap();
                 }
             },
             _ => unreachable!()
@@ -244,12 +294,12 @@ fn save_params_txt(w: &Vec<f64>, save_file: &str, vocab_file: &str,
                 for x in unk_context.iter() { fout.write_fmt(format_args!(" {}", x)).unwrap(); }
             },
             1 => {
-                for x in unk_vec[..vector_size + 1].iter() {
+                for x in unk_vec[..vector_size].iter() {
                     fout.write_fmt(format_args!(" {}", x)).unwrap();
                 }
             },
             2 => {
-                for (x, y) in unk_vec[..vector_size + 1].iter().zip(unk_context.iter()) {
+                for (x, y) in unk_vec[..vector_size].iter().zip(unk_context.iter()) {
                     fout.write_fmt(format_args!(" {}", x + y)).unwrap();
                 }
             },
@@ -259,14 +309,14 @@ fn save_params_txt(w: &Vec<f64>, save_file: &str, vocab_file: &str,
     0
 }
 
-fn save_gsq_bin(gradsq: &Vec<f64>, save_file: &str, nb_iter: usize) -> i32 {
+fn save_gsq_bin(gradsq: &[f64], save_file: &str, nb_iter: usize) -> i32 {
     let output_file_gsq: String;
     if nb_iter <= 0 {
         output_file_gsq = format!("{}.bin", save_file);
     } else {
         output_file_gsq = format!("{}.{:>03}.bin", save_file, nb_iter);
     }
-    let mut fgs = fs::File::create(output_file_gsq).unwrap();
+    let mut fgs = BufWriter::new(fs::File::create(output_file_gsq).unwrap());
     for x in gradsq.iter() {
         fgs.write(unsafe {
             slice::from_raw_parts((x as *const f64) as *const u8, 8)
@@ -275,7 +325,7 @@ fn save_gsq_bin(gradsq: &Vec<f64>, save_file: &str, nb_iter: usize) -> i32 {
     0
 }
 
-fn save_gsq_txt(gradsq: &Vec<f64>, save_file: &str, vocab_file: &str,
+fn save_gsq_txt(gradsq: &[f64], save_file: &str, vocab_file: &str,
                 vector_size: usize, vocab_size: usize, nb_iter: usize) -> i32 {
     let output_file_gsq: String;
     if nb_iter <= 0 {
@@ -283,8 +333,8 @@ fn save_gsq_txt(gradsq: &Vec<f64>, save_file: &str, vocab_file: &str,
     } else {
         output_file_gsq = format!("{}.{:>03}.txt", save_file, nb_iter);
     }
-    let mut fgs = fs::File::create(output_file_gsq).unwrap();
-    let mut fid = fs::File::open(vocab_file).unwrap();
+    let mut fgs = BufWriter::new(fs::File::create(output_file_gsq).unwrap());
+    let mut fid = BufReader::new(fs::File::open(vocab_file).unwrap());
     for a in 0 .. vocab_size {
         let word = match get_word(&mut fid) {
             GetWord::Word(w) => w,
@@ -314,59 +364,64 @@ fn train_glove(vector_size: usize, n_threads: usize, n_iter: usize,
     log!(1, "Initializing parameters...");
     let mut w: Vec<f64> = vec![];
     let mut gradsq: Vec<f64> = vec![];
-    let vocab_size = io::BufReader::new(fs::File::open(vocab_file).unwrap()).lines().count();
+    let vocab_size = BufReader::new(fs::File::open(vocab_file).unwrap()).lines().count();
     initialize_parameters(&mut w, &mut gradsq, vector_size, vocab_size);
     log!(1, "done.");
     log!(0, "vector size: {}", vector_size);
     log!(0, "vocab size: {}", vocab_size);
     log!(0, "x_max: {}", x_max);
     log!(0, "alpha: {}", alpha);
-    let share_w = MutableArray::new(w);
-    let share_gradsq = MutableArray::new(gradsq);
-    let input_file = sync::Arc::new(input_file.to_string());
+    let input_file = input_file.to_string();
     for i in 0 .. n_iter {
-        let threads: Vec<_> = (0 .. n_threads).map(|j| {
-            let start = num_lines / n_threads * j;
-            let end = if j != n_threads - 1 { num_lines / n_threads * (j + 1) } else { num_lines };
-            let share_w = share_w.clone();
-            let share_gradsq = share_gradsq.clone();
-            let input_file = input_file.clone();
-            thread::spawn(move || glove_thread(
-                    share_w, share_gradsq, alpha, eta, x_max,
-                    input_file, vector_size, vocab_size, start, end
-            ))
-        }).collect();
-        let total_cost = threads.into_iter().map(|e| e.join().unwrap()).fold(0f64, |a, b| a + b);
-        log!(-1, "{}, iter: {:>03}, cost: {}", time::strftime("%x - %I:%M.%S%p", &time::now()).unwrap(), i+1, total_cost / num_lines as f64);
+        {
+            let w_slice = UnsafeSlice::new(&mut w);
+            let gradsq_slice = UnsafeSlice::new(&mut gradsq);
+            crossbeam::scope(|scope| {
+                let threads: Vec<_> = (0 .. n_threads).map(|j| {
+                    let start = num_lines / n_threads * j;
+                    let end = if j != n_threads - 1 { num_lines / n_threads * (j + 1) } else { num_lines };
+                    let input_file = &input_file;
+                    scope.spawn(move || {
+                        glove_thread(
+                            w_slice, gradsq_slice, alpha, eta, x_max,
+                            input_file, vector_size, vocab_size, start, end
+                        )
+                    })
+                }).collect();
+                let total_cost = threads.into_iter().map(|e| e.join()).fold(0f64, |a, b| a + b);
+                log!(-1, "{}, iter: {:>03}, cost: {}", time::strftime("%x - %I:%M.%S%p", &time::now()).unwrap(), i+1, total_cost / num_lines as f64);
+            });
+        }
         if checkpoint_every > 0 && (i + 1) % checkpoint_every == 0 {
             progress!(-1, "    saving intermediate parameters for iter {:>03}...", i+1);
             if binary > 0 {
-                save_params_bin(unsafe{share_w.a.get().as_ref().unwrap()}, save_file, i + 1);
+                save_params_bin(&w, save_file, i + 1);
                 if save_gradsq {
-                    save_gsq_bin(unsafe{share_gradsq.a.get().as_ref().unwrap()}, gradsq_file, i + 1);
+                    save_gsq_bin(&gradsq, gradsq_file, i + 1);
                 }
             }
             if binary != 1 {
-                save_params_txt(unsafe{share_w.a.get().as_ref().unwrap()}, save_file, vocab_file, vector_size, vocab_size, i + 1, model);
+                save_params_txt(&w, save_file, vocab_file, vector_size, vocab_size, i + 1, model);
                 if save_gradsq {
-                    save_gsq_txt(unsafe{share_gradsq.a.get().as_ref().unwrap()}, gradsq_file, vocab_file, vector_size, vocab_size, i + 1);
+                    save_gsq_txt(&gradsq, gradsq_file, vocab_file, vector_size, vocab_size, i + 1);
                 }
             }
         }
     }
+    let mut retval = 0i32;
     if binary > 0 {
-        save_params_bin(unsafe{share_w.a.get().as_ref().unwrap()}, save_file, 0);
+        retval |= save_params_bin(&w, save_file, 0);
         if save_gradsq {
-            save_gsq_bin(unsafe{share_gradsq.a.get().as_ref().unwrap()}, gradsq_file, 0);
+            retval |= save_gsq_bin(&gradsq, gradsq_file, 0);
         }
     }
     if binary != 1 {
-        save_params_txt(unsafe{share_w.a.get().as_ref().unwrap()}, save_file, vocab_file, vector_size, vocab_size, 0, model);
+        retval |= save_params_txt(&w, save_file, vocab_file, vector_size, vocab_size, 0, model);
         if save_gradsq {
-            save_gsq_txt(unsafe{share_gradsq.a.get().as_ref().unwrap()}, gradsq_file, vocab_file, vector_size, vocab_size, 00000000);
+            retval |= save_gsq_txt(&gradsq, gradsq_file, vocab_file, vector_size, vocab_size, 00000000);
         }
     }
-    0
+    retval
 }
 
 fn main() {

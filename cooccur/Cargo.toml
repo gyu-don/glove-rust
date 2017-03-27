@@ -2,5 +2,6 @@
 name = "cooccur"
 version = "0.1.0"
 authors = ["gyu-don <takumi.kt+git@gmail.com>"]
+workspace = ".."
 
 [dependencies]
