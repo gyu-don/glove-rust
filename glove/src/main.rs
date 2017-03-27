@@ -35,18 +35,45 @@ macro_rules! log {
     );
 }
 
-#[derive(Clone)]
-struct MutableArray {
-    pub a: sync::Arc<cell::UnsafeCell<Vec<f64>>>
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+struct UnsafeSlice<'a> {
+    p: *mut f64,
+    len: usize,
+    phantom: PhantomData<&'a Vec<f64>>,
 }
-
-impl MutableArray {
-    fn new(v: Vec<f64>) -> MutableArray {
-        MutableArray { a: sync::Arc::new(cell::UnsafeCell::new(v)) }
+unsafe impl<'a> Send for UnsafeSlice<'a> {}
+unsafe impl<'a> Sync for UnsafeSlice<'a> {}
+#[allow(dead_code)]
+impl<'a> UnsafeSlice<'a> {
+    fn new(v: &mut Vec<f64>) -> UnsafeSlice {
+        UnsafeSlice { p: v.as_mut_ptr(), len: v.len(), phantom: PhantomData }
+    }
+    #[inline]
+    unsafe fn get(self, idx: usize) -> Option<&'a f64> {
+        slice::from_raw_parts(self.p, self.len).get(idx)
+    }
+    #[inline]
+    unsafe fn get_slice(self, idx: ops::Range<usize>) -> &'a[f64] {
+        &slice::from_raw_parts(self.p, self.len)[idx]
+    }
+    #[inline]
+    unsafe fn get_mut(self, idx: usize) -> Option<&'a mut f64> {
+        slice::from_raw_parts_mut(self.p, self.len).get_mut(idx)
+    }
+    #[inline]
+    unsafe fn get_slice_mut(self, idx: ops::Range<usize>) -> &'a mut [f64] {
+        &mut slice::from_raw_parts_mut(self.p, self.len)[idx]
+    }
+    #[inline]
+    unsafe fn borrow(self) -> &'a [f64] {
+        slice::from_raw_parts(self.p, self.len)
+    }
+    #[inline]
+    unsafe fn borrow_mut(self) -> &'a mut [f64] {
+        slice::from_raw_parts_mut(self.p, self.len)
     }
 }
-unsafe impl Send for MutableArray {}
-unsafe impl Sync for MutableArray {}
 
 enum GetWord {
     Word(String),
@@ -102,15 +129,13 @@ fn initialize_parameters(w: &mut Vec<f64>, gradsq: &mut Vec<f64>,
 }
 
 // Train the Glove model
-fn glove_thread(w_: MutableArray, gradsq_: MutableArray,
+fn glove_thread(w: UnsafeSlice, gradsq: UnsafeSlice,
                 alpha: f64, eta: f64, x_max: f64,
-                input_file: sync::Arc<String>, vector_size: usize, vocab_size: usize,
+                input_file: &str, vector_size: usize, vocab_size: usize,
                 start: usize, end: usize) -> f64 {
-    let w = w_.a.get();
-    let gradsq = gradsq_.a.get();
     let mut cost = 0f64;
 
-    let mut fin = fs::File::open(&*input_file).unwrap();
+    let mut fin = BufReader::new(fs::File::open(&*input_file).unwrap());
     fin.seek(io::SeekFrom::Start((start * mem::size_of::<CooccurRec>()) as u64)).unwrap();
 
     let mut w_updates1 = vec![0f64 ; vector_size];
@@ -125,10 +150,11 @@ fn glove_thread(w_: MutableArray, gradsq_: MutableArray,
 
         let l1 = (cr.word1 as usize - 1) * (vector_size + 1);
         let l2 = (cr.word2 as usize - 1 + vocab_size) * (vector_size + 1);
-        let w1 = unsafe { &mut (*w)[l1 .. l1 + vector_size] };
-        let w2 = unsafe { &mut (*w)[l2 .. l2 + vector_size] };
-        let b1 = unsafe { &mut (*w)[l1 + vector_size] };
-        let b2 = unsafe { &mut (*w)[l2 + vector_size] };
+        //if start==37916540 && i > end-6 { log!(-1, "{:?}", cr); }
+        let w1 = unsafe { w.get_slice_mut(l1 .. l1 + vector_size) };
+        let w2 = unsafe { w.get_slice_mut(l2 .. l2 + vector_size) };
+        let b1 = unsafe { w.get_mut(l1 + vector_size).unwrap() };
+        let b2 = unsafe { w.get_mut(l2 + vector_size).unwrap() };
         let diff = w1.iter().zip(w2.iter()).fold(0.0, |a, (x, y)| a + x * y) + *b1 + *b2 - cr.val.ln();
         let mut fdiff = if cr.val > x_max { diff } else { (cr.val / x_max).powf(alpha) * diff };
         if !diff.is_finite() || !fdiff.is_finite() {
@@ -138,10 +164,10 @@ fn glove_thread(w_: MutableArray, gradsq_: MutableArray,
         cost += 0.5 * fdiff * diff;  // weighted squared error
 
         // Adaptive gradient updates
-        let gradsq1 = unsafe { &mut (*gradsq)[l1 .. l1 + vector_size] };
-        let gradsq2 = unsafe { &mut (*gradsq)[l2 .. l2 + vector_size] };
-        let gradsq1_b = unsafe { &mut (*gradsq)[l1 + vector_size] };
-        let gradsq2_b = unsafe { &mut (*gradsq)[l2 + vector_size] };
+        let gradsq1 = unsafe { gradsq.get_slice_mut(l1 .. l1 + vector_size) };
+        let gradsq2 = unsafe { gradsq.get_slice_mut(l2 .. l2 + vector_size) };
+        let gradsq1_b = unsafe { gradsq.get_mut(l1 + vector_size).unwrap() };
+        let gradsq2_b = unsafe { gradsq.get_mut(l2 + vector_size).unwrap() };
         fdiff *= eta;  // for ease in calculating gradient
         {
             let mut w1_ = w1.iter();
@@ -338,7 +364,7 @@ fn train_glove(vector_size: usize, n_threads: usize, n_iter: usize,
     log!(1, "Initializing parameters...");
     let mut w: Vec<f64> = vec![];
     let mut gradsq: Vec<f64> = vec![];
-    let vocab_size = io::BufReader::new(fs::File::open(vocab_file).unwrap()).lines().count();
+    let vocab_size = BufReader::new(fs::File::open(vocab_file).unwrap()).lines().count();
     initialize_parameters(&mut w, &mut gradsq, vector_size, vocab_size);
     log!(1, "done.");
     log!(0, "vector size: {}", vector_size);
