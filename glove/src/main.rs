@@ -1,6 +1,14 @@
 extern crate rand;
 extern crate time;
 extern crate crossbeam;
+extern crate libc;
+
+#[link(name="m")]
+extern {
+    fn sqrt(x: f64) -> f64;
+    fn log(x: f64) -> f64;
+    fn pow(x: f64, x: f64) -> f64;
+}
 
 use std::{env, f64, fs, io, mem, ops, slice};
 use std::io::{BufRead, BufReader, BufWriter, ErrorKind, Read, Seek, Write};
@@ -121,9 +129,10 @@ fn initialize_parameters(w: &mut Vec<f64>, gradsq: &mut Vec<f64>,
     w.reserve(2 * vocab_size * (vector_size + 1));
     gradsq.reserve(2 * vocab_size * (vector_size + 1));
 
-    let mut rng = rand::thread_rng();
+    //let mut rng = rand::thread_rng();
     for _ in 0 .. 2 * vocab_size * (vector_size + 1) {
-        w.push((rng.next_f64() - 0.5) / (vector_size + 1) as f64);
+        //w.push((rng.next_f64() - 0.5) / (vector_size + 1) as f64);
+        w.push((unsafe{libc::rand() as f64} / (libc::RAND_MAX as f64) - 0.5) / (vector_size + 1) as f64);
         gradsq.push(1.0);
     }
 }
@@ -155,8 +164,12 @@ fn glove_thread(w: UnsafeSlice, gradsq: UnsafeSlice,
         let w2 = unsafe { w.get_slice_mut(l2 .. l2 + vector_size) };
         let b1 = unsafe { w.get_mut(l1 + vector_size).unwrap() };
         let b2 = unsafe { w.get_mut(l2 + vector_size).unwrap() };
-        let diff = w1.iter().zip(w2.iter()).fold(0.0, |a, (x, y)| a + x * y) + *b1 + *b2 - cr.val.ln();
-        let mut fdiff = if cr.val > x_max { diff } else { (cr.val / x_max).powf(alpha) * diff };
+        //let diff = w1.iter().zip(w2.iter()).fold(0.0, |a, (x, y)| a + x * y) + *b1 + *b2 - cr.val.ln();
+        //let mut fdiff = if cr.val > x_max { diff } else { (cr.val / x_max).powf(alpha) * diff };
+        let diff: f64 = w1.iter().zip(w2.iter()).map(|(x, y)| x * y).sum::<f64>() + *b1 + *b2 - unsafe{log(cr.val)};
+        let mut fdiff = if cr.val > x_max { diff } else { diff * (unsafe{pow(cr.val / x_max, alpha)}) };
+        //if start == 0 && cr.word1 % 1000 == 1 && cr.word2 % 1000 == 2 { log!(-1, "w1: {}, w2: {}, val: {}, diff: {}, fdiff: {}", cr.word1, cr.word2, cr.val, diff, fdiff); }
+        if start == 0 && cr.word1 % 1000 == 1 && cr.word2 % 1000 == 2 { for x in w1.iter() { progress!(-1, "{:.6} ", *x); }log!(-1, "{:.6}", *b1);}
         if !diff.is_finite() || !fdiff.is_finite() {
             progress!(-1, "Caught NaN in diff for kdiff for thread. Skipping update");
             continue;
@@ -186,8 +199,10 @@ fn glove_thread(w: UnsafeSlice, gradsq: UnsafeSlice,
 
                 let temp1 = fdiff * w2;
                 let temp2 = fdiff * w1;
-                *wup1 = temp1 / gsq1.sqrt();
-                *wup2 = temp2 / gsq2.sqrt();
+                //*wup1 = temp1 / gsq1.sqrt();
+                //*wup2 = temp2 / gsq2.sqrt();
+                *wup1 = temp1 / unsafe{sqrt(*gsq1)};
+                *wup2 = temp2 / unsafe{sqrt(*gsq2)};
                 *gsq1 += temp1 * temp1;
                 *gsq2 += temp2 * temp2;
             }
@@ -201,8 +216,10 @@ fn glove_thread(w: UnsafeSlice, gradsq: UnsafeSlice,
         let check_nan = |x: f64| if !x.is_finite() {
             progress!(-1, "\ncaught in NaN in update"); 0f64
         } else { x };
-        *b1 -= check_nan(fdiff / gradsq1_b.sqrt());
-        *b2 -= check_nan(fdiff / gradsq2_b.sqrt());
+        //*b1 -= check_nan(fdiff / gradsq1_b.sqrt());
+        //*b2 -= check_nan(fdiff / gradsq2_b.sqrt());
+        *b1 -= check_nan(fdiff / unsafe{sqrt(*gradsq1_b)});
+        *b2 -= check_nan(fdiff / unsafe{sqrt(*gradsq2_b)});
         fdiff *= fdiff;
         *gradsq1_b += fdiff;
         *gradsq2_b += fdiff;
@@ -248,20 +265,20 @@ fn save_params_txt(w: &[f64], save_file: &str, vocab_file: &str,
         match model {
             0 => {
                 for b in 0 .. vector_size + 1 {
-                    fout.write_fmt(format_args!(" {}", w[a * (vector_size + 1) + b])).unwrap();
+                    fout.write_fmt(format_args!(" {:.5}", w[a * (vector_size + 1) + b])).unwrap();
                 }
                 for b in 0 .. vector_size + 1 {
-                    fout.write_fmt(format_args!(" {}", w[(vector_size + a) * (vector_size + 1) + b])).unwrap();
+                    fout.write_fmt(format_args!(" {:.5}", w[(vector_size + a) * (vector_size + 1) + b])).unwrap();
                 }
             },
             1 => {
                 for b in 0 .. vector_size {
-                    fout.write_fmt(format_args!(" {}", w[a * (vector_size + 1) + b])).unwrap();
+                    fout.write_fmt(format_args!(" {:.5}", w[a * (vector_size + 1) + b])).unwrap();
                 }
             },
             2 => {
                 for b in 0 .. vector_size {
-                    fout.write_fmt(format_args!(" {}", w[a * (vector_size + 1) + b] + w[(vector_size + a) * (vector_size + 1) + b])).unwrap();
+                    fout.write_fmt(format_args!(" {:.5}", w[a * (vector_size + 1) + b] + w[(vector_size + a) * (vector_size + 1) + b])).unwrap();
                 }
             },
             _ => unreachable!()
