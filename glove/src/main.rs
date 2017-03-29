@@ -169,7 +169,6 @@ fn glove_thread(w: UnsafeSlice, gradsq: UnsafeSlice,
         let diff: f64 = w1.iter().zip(w2.iter()).map(|(x, y)| x * y).sum::<f64>() + *b1 + *b2 - unsafe{log(cr.val)};
         let mut fdiff = if cr.val > x_max { diff } else { diff * (unsafe{pow(cr.val / x_max, alpha)}) };
         //if start == 0 && cr.word1 % 1000 == 1 && cr.word2 % 1000 == 2 { log!(-1, "w1: {}, w2: {}, val: {}, diff: {}, fdiff: {}", cr.word1, cr.word2, cr.val, diff, fdiff); }
-        if start == 0 && cr.word1 % 1000 == 1 && cr.word2 % 1000 == 2 { for x in w1.iter() { progress!(-1, "{:.6} ", *x); }log!(-1, "{:.6}", *b1);}
         if !diff.is_finite() || !fdiff.is_finite() {
             progress!(-1, "Caught NaN in diff for kdiff for thread. Skipping update");
             continue;
@@ -223,6 +222,7 @@ fn glove_thread(w: UnsafeSlice, gradsq: UnsafeSlice,
         fdiff *= fdiff;
         *gradsq1_b += fdiff;
         *gradsq2_b += fdiff;
+        if start == 0 && cr.word1 % 1000 == 1 && cr.word2 % 1000 == 2 { for x in w2.iter() { progress!(-1, "{:.6} ", *x); }log!(-1, "{:.6}", *b2);}
     }
     cost
 }
@@ -268,7 +268,7 @@ fn save_params_txt(w: &[f64], save_file: &str, vocab_file: &str,
                     fout.write_fmt(format_args!(" {:.5}", w[a * (vector_size + 1) + b])).unwrap();
                 }
                 for b in 0 .. vector_size + 1 {
-                    fout.write_fmt(format_args!(" {:.5}", w[(vector_size + a) * (vector_size + 1) + b])).unwrap();
+                    fout.write_fmt(format_args!(" {:.5}", w[(vocab_size + a) * (vector_size + 1) + b])).unwrap();
                 }
             },
             1 => {
@@ -278,7 +278,7 @@ fn save_params_txt(w: &[f64], save_file: &str, vocab_file: &str,
             },
             2 => {
                 for b in 0 .. vector_size {
-                    fout.write_fmt(format_args!(" {:.5}", w[a * (vector_size + 1) + b] + w[(vector_size + a) * (vector_size + 1) + b])).unwrap();
+                    fout.write_fmt(format_args!(" {:.5}", w[a * (vector_size + 1) + b] + w[(vocab_size + a) * (vector_size + 1) + b])).unwrap();
                 }
             },
             _ => unreachable!()
@@ -307,17 +307,17 @@ fn save_params_txt(w: &[f64], save_file: &str, vocab_file: &str,
         fout.write(word.as_bytes()).unwrap();
         match model {
             0 => {
-                for x in unk_vec.iter() { fout.write_fmt(format_args!(" {}", x)).unwrap(); }
-                for x in unk_context.iter() { fout.write_fmt(format_args!(" {}", x)).unwrap(); }
+                for x in unk_vec.iter() { fout.write_fmt(format_args!(" {:.5}", x)).unwrap(); }
+                for x in unk_context.iter() { fout.write_fmt(format_args!(" {:.5}", x)).unwrap(); }
             },
             1 => {
                 for x in unk_vec[..vector_size].iter() {
-                    fout.write_fmt(format_args!(" {}", x)).unwrap();
+                    fout.write_fmt(format_args!(" {:.5}", x)).unwrap();
                 }
             },
             2 => {
                 for (x, y) in unk_vec[..vector_size].iter().zip(unk_context.iter()) {
-                    fout.write_fmt(format_args!(" {}", x + y)).unwrap();
+                    fout.write_fmt(format_args!(" {:.5}", x + y)).unwrap();
                 }
             },
             _ => unreachable!()
@@ -361,10 +361,10 @@ fn save_gsq_txt(gradsq: &[f64], save_file: &str, vocab_file: &str,
         if word == "<unk>" { return 1; }
         fgs.write(word.as_bytes()).unwrap();
         for x in gradsq[a * (vector_size + 1) .. (a + 1) * (vector_size + 1)].iter() {
-            fgs.write_fmt(format_args!(" {}", x)).unwrap();
+            fgs.write_fmt(format_args!(" {.5}", x)).unwrap();
         }
         for x in gradsq[(vocab_size + a) * (vector_size + 1) .. (vocab_size + a + 1) * (vector_size + 1)].iter() {
-            fgs.write_fmt(format_args!(" {}", x)).unwrap();
+            fgs.write_fmt(format_args!(" {.5}", x)).unwrap();
         }
     }
     0
@@ -378,7 +378,7 @@ fn train_glove(vector_size: usize, n_threads: usize, n_iter: usize,
     let num_lines = fs::metadata(input_file).unwrap().len() as usize / mem::size_of::<CooccurRec>();
     log!(-1, "Read {} lines.", num_lines);
 
-    log!(1, "Initializing parameters...");
+    progress!(1, "Initializing parameters...");
     let mut w: Vec<f64> = vec![];
     let mut gradsq: Vec<f64> = vec![];
     let vocab_size = BufReader::new(fs::File::open(vocab_file).unwrap()).lines().count();
