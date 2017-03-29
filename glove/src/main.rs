@@ -361,10 +361,10 @@ fn save_gsq_txt(gradsq: &[f64], save_file: &str, vocab_file: &str,
         if word == "<unk>" { return 1; }
         fgs.write(word.as_bytes()).unwrap();
         for x in gradsq[a * (vector_size + 1) .. (a + 1) * (vector_size + 1)].iter() {
-            fgs.write_fmt(format_args!(" {.5}", x)).unwrap();
+            fgs.write_fmt(format_args!(" {:.5}", x)).unwrap();
         }
         for x in gradsq[(vocab_size + a) * (vector_size + 1) .. (vocab_size + a + 1) * (vector_size + 1)].iter() {
-            fgs.write_fmt(format_args!(" {.5}", x)).unwrap();
+            fgs.write_fmt(format_args!(" {:.5}", x)).unwrap();
         }
     }
     0
