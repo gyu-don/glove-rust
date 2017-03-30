@@ -150,7 +150,6 @@ fn glove_thread(w: UnsafeSlice, gradsq: UnsafeSlice,
 
         let l1 = (cr.word1 as usize - 1) * (vector_size + 1);
         let l2 = (cr.word2 as usize - 1 + vocab_size) * (vector_size + 1);
-        //if start==37916540 && i > end-6 { log!(-1, "{:?}", cr); }
         let w1 = unsafe { w.get_slice_mut(l1 .. l1 + vector_size) };
         let w2 = unsafe { w.get_slice_mut(l2 .. l2 + vector_size) };
         let b1 = unsafe { w.get_mut(l1 + vector_size).unwrap() };
@@ -248,20 +247,20 @@ fn save_params_txt(w: &[f64], save_file: &str, vocab_file: &str,
         match model {
             0 => {
                 for b in 0 .. vector_size + 1 {
-                    fout.write_fmt(format_args!(" {}", w[a * (vector_size + 1) + b])).unwrap();
+                    fout.write_fmt(format_args!(" {:.5}", w[a * (vector_size + 1) + b])).unwrap();
                 }
                 for b in 0 .. vector_size + 1 {
-                    fout.write_fmt(format_args!(" {}", w[(vector_size + a) * (vector_size + 1) + b])).unwrap();
+                    fout.write_fmt(format_args!(" {:.5}", w[(vocab_size + a) * (vector_size + 1) + b])).unwrap();
                 }
             },
             1 => {
                 for b in 0 .. vector_size {
-                    fout.write_fmt(format_args!(" {}", w[a * (vector_size + 1) + b])).unwrap();
+                    fout.write_fmt(format_args!(" {:.5}", w[a * (vector_size + 1) + b])).unwrap();
                 }
             },
             2 => {
                 for b in 0 .. vector_size {
-                    fout.write_fmt(format_args!(" {}", w[a * (vector_size + 1) + b] + w[(vector_size + a) * (vector_size + 1) + b])).unwrap();
+                    fout.write_fmt(format_args!(" {:.5}", w[a * (vector_size + 1) + b] + w[(vocab_size + a) * (vector_size + 1) + b])).unwrap();
                 }
             },
             _ => unreachable!()
@@ -290,17 +289,17 @@ fn save_params_txt(w: &[f64], save_file: &str, vocab_file: &str,
         fout.write(word.as_bytes()).unwrap();
         match model {
             0 => {
-                for x in unk_vec.iter() { fout.write_fmt(format_args!(" {}", x)).unwrap(); }
-                for x in unk_context.iter() { fout.write_fmt(format_args!(" {}", x)).unwrap(); }
+                for x in unk_vec.iter() { fout.write_fmt(format_args!(" {:.5}", x)).unwrap(); }
+                for x in unk_context.iter() { fout.write_fmt(format_args!(" {:.5}", x)).unwrap(); }
             },
             1 => {
                 for x in unk_vec[..vector_size].iter() {
-                    fout.write_fmt(format_args!(" {}", x)).unwrap();
+                    fout.write_fmt(format_args!(" {:.5}", x)).unwrap();
                 }
             },
             2 => {
                 for (x, y) in unk_vec[..vector_size].iter().zip(unk_context.iter()) {
-                    fout.write_fmt(format_args!(" {}", x + y)).unwrap();
+                    fout.write_fmt(format_args!(" {:.5}", x + y)).unwrap();
                 }
             },
             _ => unreachable!()
@@ -344,10 +343,10 @@ fn save_gsq_txt(gradsq: &[f64], save_file: &str, vocab_file: &str,
         if word == "<unk>" { return 1; }
         fgs.write(word.as_bytes()).unwrap();
         for x in gradsq[a * (vector_size + 1) .. (a + 1) * (vector_size + 1)].iter() {
-            fgs.write_fmt(format_args!(" {}", x)).unwrap();
+            fgs.write_fmt(format_args!(" {:.5}", x)).unwrap();
         }
         for x in gradsq[(vocab_size + a) * (vector_size + 1) .. (vocab_size + a + 1) * (vector_size + 1)].iter() {
-            fgs.write_fmt(format_args!(" {}", x)).unwrap();
+            fgs.write_fmt(format_args!(" {:.5}", x)).unwrap();
         }
     }
     0
@@ -361,7 +360,7 @@ fn train_glove(vector_size: usize, n_threads: usize, n_iter: usize,
     let num_lines = fs::metadata(input_file).unwrap().len() as usize / mem::size_of::<CooccurRec>();
     log!(-1, "Read {} lines.", num_lines);
 
-    log!(1, "Initializing parameters...");
+    progress!(1, "Initializing parameters...");
     let mut w: Vec<f64> = vec![];
     let mut gradsq: Vec<f64> = vec![];
     let vocab_size = BufReader::new(fs::File::open(vocab_file).unwrap()).lines().count();
