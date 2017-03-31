@@ -1,2 +1,2 @@
 [workspace]
-members = ["vocab_count", "cooccur", "shuffle", "glove"]
+members = ["vocab_count", "cooccur", "shuffle", "glove", "word_analogy"]

@@ -1,0 +1,8 @@
+[package]
+name = "word_analogy"
+version = "0.1.0"
+authors = ["gyu-don <takumi.kt+git@gmail.com>"]
+workspace = ".."
+
+[dependencies]
+clap = "2.21.1"
