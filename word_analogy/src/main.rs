@@ -11,9 +11,9 @@ macro_rules! some {
 
 fn generate(vocab_file: &str, vectors_file: &str) -> Result<HashMap<String, Vec<f64>>, Error> {
     let mut map = HashMap::<String, Vec<f64>>::new();
-    let mut f = io::BufReader::new(fs::File::open(vectors_file)?);
-    let mut line = String::new();
-    while f.read_line(&mut line).is_ok() {
+    let f = io::BufReader::new(fs::File::open(vectors_file)?);
+    for line in f.lines() {
+        let line = line?;
         let s = line.trim();
         if s.len() == 0 { break; }
         let mut it = s.split_whitespace();
@@ -25,6 +25,8 @@ fn generate(vocab_file: &str, vectors_file: &str) -> Result<HashMap<String, Vec<
                 Err(e) => return Err(Error::new(ErrorKind::InvalidData, e)),
             }
         }
+        let norm = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+        for x in v.iter_mut() { *x /= norm; }
         map.insert(w.to_string(), v);
     }
     // normalize: pending
@@ -32,11 +34,13 @@ fn generate(vocab_file: &str, vectors_file: &str) -> Result<HashMap<String, Vec<
 }
 
 fn word_analogy<'a>(map: &'a HashMap<String, Vec<f64>>, w1: &str, w2: &str, w3: &str) -> Option<Vec<(&'a str, f64)>> {
-    let mut vec = some!(map.get(w1)).clone();
-    let it2 = some!(map.get(w2)).iter();
-    for (x, y) in vec.iter_mut().zip(it2) { *x += *y; }
+    let mut vec = some!(map.get(w2)).clone();
+    let it2 = some!(map.get(w1)).iter();
+    for (x, y) in vec.iter_mut().zip(it2) { *x -= *y; }
     let it3 = some!(map.get(w3)).iter();
-    for (x, y) in vec.iter_mut().zip(it3) { *x -= *y; }
+    for (x, y) in vec.iter_mut().zip(it3) { *x += *y; }
+    let norm = vec.iter().map(|x| x * x).sum::<f64>().sqrt();
+    for x in vec.iter_mut() { *x /= norm; }
     let mut wv: Vec<(&'a str, f64)> = map.iter().map(|(w, v)| {
         if w != w1 && w != w2 && w != w3 {
             // inner product
@@ -44,7 +48,7 @@ fn word_analogy<'a>(map: &'a HashMap<String, Vec<f64>>, w1: &str, w2: &str, w3: 
         }
         else { (w.as_str(), f64::NEG_INFINITY) }
     }).collect();
-    wv.sort_by(|x,y| (x.1).partial_cmp(&y.1).unwrap_or(cmp::Ordering::Less));
+    wv.sort_by(|x,y| (y.1).partial_cmp(&x.1).unwrap_or(cmp::Ordering::Less));
     Some(wv)
 }
 
@@ -61,15 +65,16 @@ fn main() {
     println!("vectors_file: {}", matches.value_of("vectors_file").unwrap());
     let word_vector = generate(matches.value_of("vocab_file").unwrap(),
                             matches.value_of("vectors_file").unwrap()).unwrap();
-    let mut line = String::new();
     println!("Enter 3 words (EXIT to break)");
-    while io::stdin().read_line(&mut line).is_ok() {
+    loop {
+        let mut line = String::new();
+        if io::stdin().read_line(&mut line).is_err() { break; }
         let line = line.trim().to_string();
         if line == "EXIT" { break; }
         let words: Vec<_> = line.split_whitespace().collect();
         if words.len() == 3 {
-            let v = word_analogy(&word_vector, words[0], words[1], words[2]);
-            for (x, _) in v.unwrap().iter().zip(0 .. 100) {
+            let v = word_analogy(&word_vector, words[0], words[1], words[2]).unwrap_or(vec![]);
+            for (x, _) in v.iter().zip(0 .. 10) {
                 println!("{:?}", x);
             }
         }
