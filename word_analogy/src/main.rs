@@ -9,7 +9,7 @@ macro_rules! some {
     ( $e : expr ) => { match $e { Some(x) => x, None => return None } }
 }
 
-fn generate(vocab_file: &str, vectors_file: &str) -> Result<HashMap<String, Vec<f64>>, Error> {
+fn generate(vectors_file: &str) -> Result<HashMap<String, Vec<f64>>, Error> {
     let mut map = HashMap::<String, Vec<f64>>::new();
     let f = io::BufReader::new(fs::File::open(vectors_file)?);
     for line in f.lines() {
@@ -55,16 +55,12 @@ fn word_analogy<'a>(map: &'a HashMap<String, Vec<f64>>, w1: &str, w2: &str, w3: 
 fn main() {
     let matches = App::new("distance")
         .about("Get distance between 2 vectors.")
-        .arg(Arg::with_name("vocab_file")
-            .default_value("vocab.txt"))
         .arg(Arg::with_name("vectors_file")
              .default_value("vectors.txt"))
         .get_matches();
 
-    println!("vocab_file: {}", matches.value_of("vocab_file").unwrap());
     println!("vectors_file: {}", matches.value_of("vectors_file").unwrap());
-    let word_vector = generate(matches.value_of("vocab_file").unwrap(),
-                            matches.value_of("vectors_file").unwrap()).unwrap();
+    let word_vector = generate(matches.value_of("vectors_file").unwrap()).unwrap();
     println!("Enter 3 words (EXIT to break)");
     loop {
         let mut line = String::new();
