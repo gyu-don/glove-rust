@@ -83,6 +83,7 @@ enum GetWord {
     Utf8Error(std::string::FromUtf8Error),
 }
 
+#[inline]
 fn get_word(fin: &mut io::Read) -> GetWord {
     let mut lastword: bool = false;
 
@@ -128,6 +129,13 @@ fn initialize_parameters(w: &mut Vec<f64>, gradsq: &mut Vec<f64>,
     }
 }
 
+// updates for bias terms
+#[inline]
+fn check_nan(x: f64) -> f64 {
+    if x.is_finite() { x }
+    else { progress!(-1, "\ncaught in NaN in update"); 0f64 }
+}
+
 // Train the Glove model
 fn glove_thread(w: UnsafeSlice, gradsq: UnsafeSlice,
                 alpha: f64, eta: f64, x_max: f64,
@@ -143,10 +151,11 @@ fn glove_thread(w: UnsafeSlice, gradsq: UnsafeSlice,
 
     for _ in start .. end {
         let mut cr: CooccurRec = unsafe { mem::uninitialized() };
-        fin.read_exact(unsafe {
+        fin.read(unsafe {
             slice::from_raw_parts_mut((&mut cr as *mut CooccurRec) as *mut u8,
             mem::size_of::<CooccurRec>()) }).unwrap();
-        if cr.word1 < 1 || cr.word2 < 1 { continue; }
+        if cr.word1 < 1 || (cr.word1 as usize) > vocab_size ||
+            cr.word2 < 1 || (cr.word2 as usize) > vocab_size { continue; }
 
         let l1 = (cr.word1 as usize - 1) * (vector_size + 1);
         let l2 = (cr.word2 as usize - 1 + vocab_size) * (vector_size + 1);
@@ -168,38 +177,18 @@ fn glove_thread(w: UnsafeSlice, gradsq: UnsafeSlice,
         let gradsq1_b = unsafe { gradsq.get_mut(l1 + vector_size).unwrap() };
         let gradsq2_b = unsafe { gradsq.get_mut(l2 + vector_size).unwrap() };
         fdiff *= eta;  // for ease in calculating gradient
-        {
-            let mut w1_ = w1.iter();
-            let mut w2_ = w2.iter();
-            let mut gsq1_ = gradsq1.iter_mut();
-            let mut gsq2_ = gradsq2.iter_mut();
-            let mut w_updates1_ = w_updates1.iter_mut();
-            let mut w_updates2_ = w_updates2.iter_mut();
-            for _ in 0 .. vector_size {
-                let w1 = w1_.next().unwrap();
-                let w2 = w2_.next().unwrap();
-                let gsq1 = gsq1_.next().unwrap();
-                let gsq2 = gsq2_.next().unwrap();
-                let wup1 = w_updates1_.next().unwrap();
-                let wup2 = w_updates2_.next().unwrap();
-
-                let temp1 = fdiff * w2;
-                let temp2 = fdiff * w1;
-                *wup1 = temp1 / gsq1.sqrt();
-                *wup2 = temp2 / gsq2.sqrt();
-                *gsq1 += temp1 * temp1;
-                *gsq2 += temp2 * temp2;
-            }
+        for i in 0 .. vector_size {
+            let temp1 = fdiff * w2[i];
+            let temp2 = fdiff * w1[i];
+            w_updates1[i] = temp1 / gradsq1[i].sqrt();
+            w_updates2[i] = temp2 / gradsq2[i].sqrt();
+            gradsq1[i] += temp1 * temp1;
+            gradsq2[i] += temp2 * temp2;
         }
-        if w_updates1.iter().sum::<f64>().is_finite() &&
-           w_updates2.iter().sum::<f64>().is_finite() {
+        if w_updates1.iter().sum::<f64>().is_finite() && w_updates2.iter().sum::<f64>().is_finite() {
             for (x, y) in w1.iter_mut().zip(w_updates1.iter()) { *x -= *y; }
             for (x, y) in w2.iter_mut().zip(w_updates2.iter()) { *x -= *y; }
         }
-        // updates for bias terms
-        let check_nan = |x: f64| if !x.is_finite() {
-            progress!(-1, "\ncaught in NaN in update"); 0f64
-        } else { x };
         *b1 -= check_nan(fdiff / gradsq1_b.sqrt());
         *b2 -= check_nan(fdiff / gradsq2_b.sqrt());
         fdiff *= fdiff;
